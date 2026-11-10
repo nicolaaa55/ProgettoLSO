@@ -1,0 +1,9 @@
+# Eseguibili binari nella root
+/server
+/client
+
+# File oggetto
+*.o
+
+# Log e file temporanei
+*.log
