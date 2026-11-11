@@ -331,6 +331,12 @@ void lobby_remove_client(ClientSession *client) {
                 }
             } else if (g->host == client && g->guest == NULL) {
                 /* Host abbandona mentre era solo in attesa */
+                if (g->pending_challenger && g->pending_challenger->active) {
+                    g->pending_challenger->state = STATE_LOBBY;
+                    g->pending_challenger->active_game_id = -1;
+                    client_send(g->pending_challenger, "ERR_GAME_CANCELLED L'host si è disconnesso prima di accettare la sfida.");
+                    g->pending_challenger = NULL;
+                }
                 g->in_use = false;
                 g->host = NULL;
             } else {

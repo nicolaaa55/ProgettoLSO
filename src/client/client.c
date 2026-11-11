@@ -44,6 +44,7 @@ enum CombatOutcome {
 static void host_wait_for_challenger(int sock);
 static void run_game_session(int sock, const char *opponent_nick, bool start_my_turn);
 static bool ask_rematch(int sock, const char *opponent_nick);
+static int handle_opponent_disconnected(int sock);
 
 /* Attende e legge una linea dal server, gestendo eventuali disconnessioni */
 static int read_server_line(int sock, char *buf, size_t size) {
@@ -53,6 +54,159 @@ static int read_server_line(int sock, char *buf, size_t size) {
         return -1;
     }
     return n;
+}
+
+/* Lettura riga con multiplexing tra tastiera e socket di rete.
+ * Ritorna:
+ *   >= 0 : caratteri letti da stdin
+ *   -1   : errore o chiusura stdin / interruzione
+ *   -2   : l'avversario si è disconnesso (ricevuto OPPONENT_DISCONNECTED dal server)
+ */
+static int safe_read_line_multiplex(int sock, char *buf, size_t size) {
+    fd_set readfds;
+    while (g_client_running) {
+        FD_ZERO(&readfds);
+        FD_SET(STDIN_FILENO, &readfds);
+        FD_SET(sock, &readfds);
+        int maxfd = (sock > STDIN_FILENO) ? sock : STDIN_FILENO;
+
+        int ret = select(maxfd + 1, &readfds, NULL, NULL, NULL);
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+
+        if (FD_ISSET(sock, &readfds)) {
+            char smsg[BUFFER_SIZE];
+            int n = recv_line(sock, smsg, sizeof(smsg));
+            if (n <= 0) return -1;
+            if (strncmp(smsg, "OPPONENT_DISCONNECTED", 21) == 0 ||
+                strncmp(smsg, "INFO", 4) == 0 ||
+                strncmp(smsg, "ERR_GAME_CANCELLED", 18) == 0 ||
+                strncmp(smsg, "ERR_", 4) == 0) {
+                return -2; /* Disconnessione avversario / cancellazione stanza tempestiva */
+            }
+        }
+
+        if (FD_ISSET(STDIN_FILENO, &readfds)) {
+            return safe_read_line(buf, size);
+        }
+    }
+    return -1;
+}
+
+static int get_valid_int_multiplex(int sock, const char *prompt, int min, int max, int *out_val) {
+    char buf[64];
+    while (g_client_running) {
+        printf("%s", prompt);
+        fflush(stdout);
+        int r = safe_read_line_multiplex(sock, buf, sizeof(buf));
+        if (r == -2) return -2;
+        if (r < 0) return -1;
+        int val;
+        if (parse_int_in_range(buf, min, max, &val)) {
+            *out_val = val;
+            return 0;
+        }
+        printf("\033[1;31m[!] Valore non valido. Inserisci un numero tra %d e %d.\033[0m\n", min, max);
+    }
+    return -1;
+}
+
+static int get_valid_coords_multiplex(int sock, const char *prompt, int *out_row, int *out_col) {
+    char buf[64];
+    while (g_client_running) {
+        printf("%s", prompt);
+        fflush(stdout);
+        int r = safe_read_line_multiplex(sock, buf, sizeof(buf));
+        if (r == -2) return -2;
+        if (r < 0) return -1;
+        int row, col;
+        if (parse_coord_str(buf, &row, &col)) {
+            *out_row = row;
+            *out_col = col;
+            return 0;
+        }
+        printf("\033[1;31m[!] Formato coordinata non valido. Usa es. B4, A1, J10 (righe A-J, colonne 1-10).\033[0m\n");
+    }
+    return -1;
+}
+
+/* Converte tutte le celle della nave affondata su opp_radar in CELL_SUNK */
+static void mark_sunk_on_radar(CellState opp_radar[BOARD_SIZE][BOARD_SIZE],
+                               int shot_r, int shot_c,
+                               int sunk_r, int sunk_c, int sunk_len, int sunk_dir) {
+    /* 1) Se abbiamo i metadati canonici dal server, li applichiamo direttamente */
+    if (sunk_len > 0 && sunk_r >= 0 && sunk_r < BOARD_SIZE && sunk_c >= 0 && sunk_c < BOARD_SIZE) {
+        bool is_vert = (sunk_dir == DIR_VERTICAL || sunk_dir == DIR_DOWN || sunk_dir == DIR_UP);
+        for (int i = 0; i < sunk_len; i++) {
+            int r = is_vert ? (sunk_r + i) : sunk_r;
+            int c = is_vert ? sunk_c : (sunk_c + i);
+            if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
+                opp_radar[r][c] = CELL_SUNK;
+            }
+        }
+    }
+
+    /* 2) Marcatura della cella del colpo che ha causato l'affondamento */
+    if (shot_r >= 0 && shot_r < BOARD_SIZE && shot_c >= 0 && shot_c < BOARD_SIZE) {
+        opp_radar[shot_r][shot_c] = CELL_SUNK;
+
+        /* 3) Scansione di sicurezza robusta: converte qualsiasi CELL_HIT ('X') contigua in CELL_SUNK ('*') */
+        for (int c = shot_c - 1; c >= 0 && opp_radar[shot_r][c] == CELL_HIT; c--) {
+            opp_radar[shot_r][c] = CELL_SUNK;
+        }
+        for (int c = shot_c + 1; c < BOARD_SIZE && opp_radar[shot_r][c] == CELL_HIT; c++) {
+            opp_radar[shot_r][c] = CELL_SUNK;
+        }
+        for (int r = shot_r - 1; r >= 0 && opp_radar[r][shot_c] == CELL_HIT; r--) {
+            opp_radar[r][shot_c] = CELL_SUNK;
+        }
+        for (int r = shot_r + 1; r < BOARD_SIZE && opp_radar[r][shot_c] == CELL_HIT; r++) {
+            opp_radar[r][shot_c] = CELL_SUNK;
+        }
+    }
+}
+
+/* Converte tutte le celle della nave affondata sulla propria griglia in CELL_SUNK */
+static void mark_sunk_on_my_board(Board *my_board, int shot_r, int shot_c,
+                                  int sunk_r, int sunk_c, int sunk_len, int sunk_dir) {
+    if (!my_board) return;
+
+    /* 1) Usa la ship_map locale della propria flotta per massima fedeltà */
+    if (shot_r >= 0 && shot_r < BOARD_SIZE && shot_c >= 0 && shot_c < BOARD_SIZE) {
+        int ship_idx = my_board->ship_map[shot_r][shot_c];
+        if (ship_idx >= 0 && ship_idx < NUM_SHIPS) {
+            int sr = my_board->ships[ship_idx].row;
+            int sc = my_board->ships[ship_idx].col;
+            int slen = my_board->ships[ship_idx].size;
+            bool is_vert = (my_board->ships[ship_idx].dir == DIR_VERTICAL ||
+                            my_board->ships[ship_idx].dir == DIR_DOWN ||
+                            my_board->ships[ship_idx].dir == DIR_UP);
+            for (int i = 0; i < slen; i++) {
+                int r = is_vert ? (sr + i) : sr;
+                int c = is_vert ? sc : (sc + i);
+                if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
+                    my_board->grid[r][c] = CELL_SUNK;
+                }
+            }
+            return;
+        }
+    }
+
+    /* 2) Fallback con metadati server */
+    if (sunk_len > 0 && sunk_r >= 0 && sunk_r < BOARD_SIZE && sunk_c >= 0 && sunk_c < BOARD_SIZE) {
+        bool is_vert = (sunk_dir == DIR_VERTICAL || sunk_dir == DIR_DOWN || sunk_dir == DIR_UP);
+        for (int i = 0; i < sunk_len; i++) {
+            int r = is_vert ? (sunk_r + i) : sunk_r;
+            int c = is_vert ? sunk_c : (sunk_c + i);
+            if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
+                my_board->grid[r][c] = CELL_SUNK;
+            }
+        }
+    } else if (shot_r >= 0 && shot_r < BOARD_SIZE && shot_c >= 0 && shot_c < BOARD_SIZE) {
+        my_board->grid[shot_r][shot_c] = CELL_SUNK;
+    }
 }
 
 /* Gestione piazzamento navi */
@@ -70,7 +224,9 @@ static int do_ship_placement(int sock, Board *my_board) {
     printf("  2) Posizionamento AUTOMATICO (generazione casuale rapida e valida)\n");
 
     int mode = 1;
-    if (get_valid_int("Scelta (1 o 2): ", 1, 2, &mode) < 0) return -1;
+    int m_ret = get_valid_int_multiplex(sock, "Scelta (1 o 2): ", 1, 2, &mode);
+    if (m_ret == -2) return -2;
+    if (m_ret < 0) return -1;
 
     if (mode == 2) {
         /* Posizionamento automatico calcolato dal client e inviato al server */
@@ -83,11 +239,13 @@ static int do_ship_placement(int sock, Board *my_board) {
             send_line(sock, "PLACE_SHIP %d %d %d %c", i, my_board->ships[i].row, my_board->ships[i].col, dir_c);
             char resp[BUFFER_SIZE];
             if (read_server_line(sock, resp, sizeof(resp)) < 0) return -1;
+            if (strncmp(resp, "OPPONENT_DISCONNECTED", 21) == 0) return -2;
         }
 
         /* Attende conferma di completamento placement dal server */
         char resp[BUFFER_SIZE];
         if (read_server_line(sock, resp, sizeof(resp)) < 0) return -1;
+        if (strncmp(resp, "OPPONENT_DISCONNECTED", 21) == 0) return -2;
         return 0;
     }
 
@@ -100,7 +258,9 @@ static int do_ship_placement(int sock, Board *my_board) {
                    i + 1, NUM_SHIPS, SHIP_SPECS[i].name, SHIP_SPECS[i].size);
 
             int r = -1, c = -1;
-            if (get_valid_coords("Coordinata di partenza (es. B4, A1, J10): ", &r, &c) < 0) return -1;
+            int cr = get_valid_coords_multiplex(sock, "Coordinata di partenza (es. B4, A1, J10): ", &r, &c);
+            if (cr == -2) return -2;
+            if (cr < 0) return -1;
 
             char dir_buf[32];
             ShipDirection dir = DIR_HORIZONTAL;
@@ -110,7 +270,9 @@ static int do_ship_placement(int sock, Board *my_board) {
             while (!orientation_chosen && g_client_running) {
                 printf("Orientamento [H = Orizzontale, V = Verticale]: ");
                 fflush(stdout);
-                if (safe_read_line(dir_buf, sizeof(dir_buf)) < 0) return -1;
+                int dr = safe_read_line_multiplex(sock, dir_buf, sizeof(dir_buf));
+                if (dr == -2) return -2;
+                if (dr < 0) return -1;
                 char *td = trim_whitespace(dir_buf);
                 if (!td || strlen(td) == 0) continue;
                 char choice = (char)toupper((unsigned char)td[0]);
@@ -124,7 +286,9 @@ static int do_ship_placement(int sock, Board *my_board) {
                         while (1) {
                             printf("  Direzione orizzontale [D = Verso Destra, S = Verso Sinistra]: ");
                             fflush(stdout);
-                            if (safe_read_line(dir_buf, sizeof(dir_buf)) < 0) return -1;
+                            int sdr = safe_read_line_multiplex(sock, dir_buf, sizeof(dir_buf));
+                            if (sdr == -2) return -2;
+                            if (sdr < 0) return -1;
                             char *sub = trim_whitespace(dir_buf);
                             if (sub && (toupper((unsigned char)sub[0]) == 'D' || toupper((unsigned char)sub[0]) == 'R')) {
                                 dir = DIR_RIGHT;
@@ -161,7 +325,9 @@ static int do_ship_placement(int sock, Board *my_board) {
                         while (1) {
                             printf("  Direzione verticale [B = Verso il Basso, A = Verso l'Alto]: ");
                             fflush(stdout);
-                            if (safe_read_line(dir_buf, sizeof(dir_buf)) < 0) return -1;
+                            int sdr = safe_read_line_multiplex(sock, dir_buf, sizeof(dir_buf));
+                            if (sdr == -2) return -2;
+                            if (sdr < 0) return -1;
                             char *sub = trim_whitespace(dir_buf);
                             if (sub && (toupper((unsigned char)sub[0]) == 'B' || toupper((unsigned char)sub[0]) == 'V')) {
                                 dir = DIR_DOWN;
@@ -216,6 +382,7 @@ static int do_ship_placement(int sock, Board *my_board) {
 
             char resp[BUFFER_SIZE];
             if (read_server_line(sock, resp, sizeof(resp)) < 0) return -1;
+            if (strncmp(resp, "OPPONENT_DISCONNECTED", 21) == 0) return -2;
 
             if (strncmp(resp, "SHIP_PLACED", 11) == 0) {
                 board_place_ship(my_board, i, r, c, dir);
@@ -229,6 +396,7 @@ static int do_ship_placement(int sock, Board *my_board) {
 
     char resp[BUFFER_SIZE];
     if (read_server_line(sock, resp, sizeof(resp)) < 0) return -1;
+    if (strncmp(resp, "OPPONENT_DISCONNECTED", 21) == 0) return -2;
     ui_print_single_board(my_board, "FLOTTA PRONTA");
     return 0;
 }
@@ -270,8 +438,23 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
             printf("\n\033[1;32m>>> È IL TUO TURNO! <<<\033[0m\n");
             int r = -1, c = -1;
             while (1) {
-                if (get_valid_coords("Dichiara coordinate bersaglio di fuoco (es. B4): ", &r, &c) < 0) {
-                    return -1;
+                int c_ret = get_valid_coords_multiplex(sock, "Dichiara coordinate bersaglio di fuoco (es. B4): ", &r, &c);
+                if (c_ret == -2) {
+                    int res = handle_opponent_disconnected(sock);
+                    if (res == 1) {
+                        printf("\n\033[1;32mPartita conclusa per abbandono dell'avversario. Vittoria assegnata a te!\033[0m\n");
+                        printf("\033[1;33m[i] Nessuna rivincita possibile in quanto l'avversario si è disconnesso.\033[0m\n");
+                        printf("Premi Invio per tornare alla lobby principale...");
+                        char dummy[16];
+                        safe_read_line(dummy, sizeof(dummy));
+                        return OUTCOME_FORFEIT_WIN; /* Vittoria a tavolino: no rematch */
+                    } else if (res == 2) {
+                        return OUTCOME_WAIT_NEW_CHALLENGER; /* Attesa nuovo giocatore */
+                    }
+                    return OUTCOME_ERROR;
+                }
+                if (c_ret < 0) {
+                    return OUTCOME_ERROR;
                 }
                 if (opp_radar[r][c] != CELL_EMPTY) {
                     printf("\033[1;33m[!] Hai già sparato in %c%d! Scegli un'altra cella.\033[0m\n", 'A' + r, c + 1);
@@ -283,7 +466,22 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
             send_line(sock, "FIRE %d %d", r, c);
 
             /* Leggi esito del colpo */
-            if (read_server_line(sock, line, sizeof(line)) < 0) return -1;
+            if (read_server_line(sock, line, sizeof(line)) < 0) return OUTCOME_ERROR;
+
+            if (strncmp(line, "OPPONENT_DISCONNECTED", 21) == 0) {
+                int res = handle_opponent_disconnected(sock);
+                if (res == 1) {
+                    printf("\n\033[1;32mPartita conclusa per abbandono dell'avversario. Vittoria assegnata a te!\033[0m\n");
+                    printf("\033[1;33m[i] Nessuna rivincita possibile in quanto l'avversario si è disconnesso.\033[0m\n");
+                    printf("Premi Invio per tornare alla lobby principale...");
+                    char dummy[16];
+                    safe_read_line(dummy, sizeof(dummy));
+                    return OUTCOME_FORFEIT_WIN;
+                } else if (res == 2) {
+                    return OUTCOME_WAIT_NEW_CHALLENGER;
+                }
+                return OUTCOME_ERROR;
+            }
 
             char shooter[32], outcome[32], ship_name[32];
             int shot_r = -1, shot_c = -1, next_turn = 0;
@@ -299,23 +497,13 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
                     opp_radar[shot_r][shot_c] = CELL_HIT;
                     printf("\n\033[1;31m>>> COLPITO! Nave nemica centrata in %c%d! <<<\033[0m\n", 'A' + shot_r, shot_c + 1);
                 } else if (strcmp(outcome, "SUNK") == 0) {
-                    if (parsed >= 10 && sunk_len > 0) {
-                        for (int i = 0; i < sunk_len; i++) {
-                            int r = (sunk_dir == DIR_VERTICAL) ? (sunk_r + i) : sunk_r;
-                            int c = (sunk_dir == DIR_HORIZONTAL) ? (sunk_c + i) : sunk_c;
-                            if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
-                                opp_radar[r][c] = CELL_SUNK;
-                            }
-                        }
-                    } else {
-                        opp_radar[shot_r][shot_c] = CELL_SUNK;
-                    }
+                    mark_sunk_on_radar(opp_radar, shot_r, shot_c, sunk_r, sunk_c, sunk_len, sunk_dir);
                     printf("\n\033[1;41;37m>>> COLPITO E AFFONDATO! Hai affondato: %s! <<<\033[0m\n", ship_name);
                 }
             }
 
             /* Controlla prossimo messaggio (GAME_OVER, OPPONENT_DISCONNECTED o WAIT_TURN) */
-            if (read_server_line(sock, line, sizeof(line)) < 0) return -1;
+            if (read_server_line(sock, line, sizeof(line)) < 0) return OUTCOME_ERROR;
 
             if (strncmp(line, "OPPONENT_DISCONNECTED", 21) == 0) {
                 int res = handle_opponent_disconnected(sock);
@@ -379,38 +567,28 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
                     my_board->grid[shot_r][shot_c] = CELL_HIT;
                     printf("\n\033[1;31m>>> ALLARME! %s ha COLPITO una tua nave in %c%d! <<<\033[0m\n", opponent_nick, 'A' + shot_r, shot_c + 1);
                 } else if (strcmp(outcome, "SUNK") == 0) {
-                    if (parsed >= 10 && sunk_len > 0) {
-                        for (int i = 0; i < sunk_len; i++) {
-                            int r = (sunk_dir == DIR_VERTICAL) ? (sunk_r + i) : sunk_r;
-                            int c = (sunk_dir == DIR_HORIZONTAL) ? (sunk_c + i) : sunk_c;
-                            if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
-                                my_board->grid[r][c] = CELL_SUNK;
-                            }
-                        }
-                    } else {
-                        int ship_idx = my_board->ship_map[shot_r][shot_c];
-                        if (ship_idx >= 0 && ship_idx < NUM_SHIPS) {
-                            int sr = my_board->ships[ship_idx].row;
-                            int sc = my_board->ships[ship_idx].col;
-                            int slen = my_board->ships[ship_idx].size;
-                            ShipDirection sdir = my_board->ships[ship_idx].dir;
-                            for (int i = 0; i < slen; i++) {
-                                int r = (sdir == DIR_VERTICAL) ? (sr + i) : sr;
-                                int c = (sdir == DIR_HORIZONTAL) ? (sc + i) : sc;
-                                if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
-                                    my_board->grid[r][c] = CELL_SUNK;
-                                }
-                            }
-                        } else {
-                            my_board->grid[shot_r][shot_c] = CELL_SUNK;
-                        }
-                    }
+                    mark_sunk_on_my_board(my_board, shot_r, shot_c, sunk_r, sunk_c, sunk_len, sunk_dir);
                     printf("\n\033[1;41;37m>>> AFFONDATA! La tua nave '%s' è stata affondata da %s! <<<\033[0m\n", ship_name, opponent_nick);
                 }
             }
 
-            /* Controlla prossimo messaggio (GAME_OVER o YOUR_TURN) */
+            /* Controlla prossimo messaggio (GAME_OVER, OPPONENT_DISCONNECTED o YOUR_TURN) */
             if (read_server_line(sock, line, sizeof(line)) < 0) return OUTCOME_ERROR;
+
+            if (strncmp(line, "OPPONENT_DISCONNECTED", 21) == 0) {
+                int res = handle_opponent_disconnected(sock);
+                if (res == 1) {
+                    printf("\n\033[1;32mPartita conclusa per abbandono dell'avversario. Vittoria assegnata a te!\033[0m\n");
+                    printf("\033[1;33m[i] Nessuna rivincita possibile in quanto l'avversario si è disconnesso.\033[0m\n");
+                    printf("Premi Invio per tornare alla lobby principale...");
+                    char dummy[16];
+                    safe_read_line(dummy, sizeof(dummy));
+                    return OUTCOME_FORFEIT_WIN;
+                } else if (res == 2) {
+                    return OUTCOME_WAIT_NEW_CHALLENGER;
+                }
+                return OUTCOME_ERROR;
+            }
 
             if (strncmp(line, "GAME_OVER", 9) == 0) {
                 ui_print_boards(my_board, opp_radar);
@@ -521,7 +699,23 @@ static bool ask_rematch(int sock, const char *opponent_nick) {
 static void run_game_session(int sock, const char *opponent_nick, bool start_my_turn) {
     while (g_client_running) {
         Board my_board;
-        if (do_ship_placement(sock, &my_board) < 0) return;
+        int p_res = do_ship_placement(sock, &my_board);
+        if (p_res == -2) {
+            int res = handle_opponent_disconnected(sock);
+            if (res == 1) {
+                printf("\n\033[1;32mPartita conclusa per abbandono dell'avversario. Vittoria assegnata a te!\033[0m\n");
+                printf("\033[1;33m[i] Nessuna rivincita possibile in quanto l'avversario si è disconnesso.\033[0m\n");
+                printf("Premi Invio per tornare alla lobby principale...");
+                char dummy[16];
+                safe_read_line(dummy, sizeof(dummy));
+                return;
+            } else if (res == 2) {
+                host_wait_for_challenger(sock);
+                return;
+            }
+            return;
+        }
+        if (p_res < 0) return;
 
         printf("\nIn attesa che l'avversario completi il posizionamento delle sue navi...\n");
         char line[BUFFER_SIZE];
@@ -616,17 +810,27 @@ static void host_wait_for_challenger(int sock) {
                 printf("  0) Rifiuta la richiesta\n");
 
                 int decision = 1;
-                if (get_valid_int("Scelta (1 o 0): ", 0, 1, &decision) < 0) return;
+                int d_ret = get_valid_int_multiplex(sock, "Scelta (1 o 0): ", 0, 1, &decision);
+                if (d_ret == -2) {
+                    printf("\n\033[1;33m[!] Lo sfidante si è disconnesso prima della risposta.\033[0m\n");
+                    continue;
+                }
+                if (d_ret < 0) return;
 
                 send_line(sock, "ACCEPT_JOIN %d", decision);
 
                 if (decision == 1) {
-                    /* Leggi JOIN_ACCEPTED e START_PLACEMENT */
-                    read_server_line(sock, line, sizeof(line));
-                    read_server_line(sock, line, sizeof(line));
+                    if (read_server_line(sock, line, sizeof(line)) < 0) return;
+                    if (strncmp(line, "JOIN_ACCEPTED", 13) != 0) {
+                        printf("\n\033[1;31m[!] Impossibile avviare la partita: %s\033[0m\n", line);
+                        continue;
+                    }
+                    /* Leggi START_PLACEMENT */
+                    if (read_server_line(sock, line, sizeof(line)) < 0) return;
                     run_game_session(sock, challenger_nick, true);
                     return;
                 } else {
+                    read_server_line(sock, line, sizeof(line));
                     printf("\nRichiesta rifiutata. Sei ancora in attesa di altri sfidanti...\n");
                 }
             } else if (strncmp(line, "INFO", 4) == 0) {
@@ -718,10 +922,15 @@ static void list_and_join_game(int sock) {
         printf("\n\033[1;32m[OK] L'host %s ha ACCETTATO la tua sfida!\033[0m\n", host_nick);
 
         /* Leggi START_PLACEMENT */
-        read_server_line(sock, line, sizeof(line));
+        if (read_server_line(sock, line, sizeof(line)) < 0) return;
         run_game_session(sock, host_nick, false);
     } else if (strncmp(line, "JOIN_REJECTED", 13) == 0) {
         printf("\n\033[1;31m[!] La tua richiesta di sfida è stata RIFIUTATA dall'host.\033[0m\n");
+        printf("Premi Invio per tornare al menu...");
+        char dummy[16];
+        safe_read_line(dummy, sizeof(dummy));
+    } else {
+        printf("\n\033[1;31m[!] %s\033[0m\n", line);
         printf("Premi Invio per tornare al menu...");
         char dummy[16];
         safe_read_line(dummy, sizeof(dummy));
