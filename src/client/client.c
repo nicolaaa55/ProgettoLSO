@@ -14,6 +14,7 @@
 #include <sys/select.h>
 #include <ctype.h>
 #include <time.h>
+#include <errno.h>
 
 static volatile sig_atomic_t g_client_running = 1;
 static int g_sock_fd = -1;
@@ -30,9 +31,19 @@ static void sigint_handler(int sig) {
     exit(0);
 }
 
+/* Esiti della fase di combattimento */
+enum CombatOutcome {
+    OUTCOME_ERROR = 0,
+    OUTCOME_VICTORY = 1,
+    OUTCOME_DEFEAT = 2,
+    OUTCOME_FORFEIT_WIN = 3,
+    OUTCOME_WAIT_NEW_CHALLENGER = 4
+};
+
 /* Prototipi funzioni mutualmente richiamate */
 static void host_wait_for_challenger(int sock);
 static void run_game_session(int sock, const char *opponent_nick, bool start_my_turn);
+static bool ask_rematch(int sock, const char *opponent_nick);
 
 /* Attende e legge una linea dal server, gestendo eventuali disconnessioni */
 static int read_server_line(int sock, char *buf, size_t size) {
@@ -314,11 +325,11 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
                     printf("Premi Invio per tornare alla lobby principale...");
                     char dummy[16];
                     safe_read_line(dummy, sizeof(dummy));
-                    return 2; /* Vittoria a tavolino: no rematch */
+                    return OUTCOME_FORFEIT_WIN; /* Vittoria a tavolino: no rematch */
                 } else if (res == 2) {
-                    return 3; /* Attesa nuovo giocatore */
+                    return OUTCOME_WAIT_NEW_CHALLENGER; /* Attesa nuovo giocatore */
                 }
-                return 0;
+                return OUTCOME_ERROR;
             }
 
             if (strncmp(line, "GAME_OVER", 9) == 0) {
@@ -328,14 +339,14 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
                 printf("               VITTORIA! HAI VINTO LA PARTITA!              \n");
                 printf("************************************************************\n");
                 printf("\033[0m\n");
-                return 1; /* Vittoria normale sul campo */
+                return OUTCOME_VICTORY; /* Vittoria normale sul campo */
             } else if (strncmp(line, "WAIT_TURN", 9) == 0) {
                 my_turn = false;
             }
         } else {
             printf("\n\033[1;33m--- In attesa del colpo di %s... ---\033[0m\n", opponent_nick);
 
-            if (read_server_line(sock, line, sizeof(line)) < 0) return -1;
+            if (read_server_line(sock, line, sizeof(line)) < 0) return OUTCOME_ERROR;
 
             if (strncmp(line, "OPPONENT_DISCONNECTED", 21) == 0) {
                 int res = handle_opponent_disconnected(sock);
@@ -345,11 +356,11 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
                     printf("Premi Invio per tornare alla lobby principale...");
                     char dummy[16];
                     safe_read_line(dummy, sizeof(dummy));
-                    return 2; /* Vittoria a tavolino: no rematch */
+                    return OUTCOME_FORFEIT_WIN; /* Vittoria a tavolino: no rematch */
                 } else if (res == 2) {
-                    return 3; /* Attesa nuovo giocatore */
+                    return OUTCOME_WAIT_NEW_CHALLENGER; /* Attesa nuovo giocatore */
                 }
-                return 0;
+                return OUTCOME_ERROR;
             }
 
             char shooter[32], outcome[32], ship_name[32];
@@ -399,7 +410,7 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
             }
 
             /* Controlla prossimo messaggio (GAME_OVER o YOUR_TURN) */
-            if (read_server_line(sock, line, sizeof(line)) < 0) return -1;
+            if (read_server_line(sock, line, sizeof(line)) < 0) return OUTCOME_ERROR;
 
             if (strncmp(line, "GAME_OVER", 9) == 0) {
                 ui_print_boards(my_board, opp_radar);
@@ -408,47 +419,99 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
                 printf("           SCONFITTA! TUTTE LE TUE NAVI SONO AFFONDATE      \n");
                 printf("************************************************************\n");
                 printf("\033[0m\n");
-                return 2; /* Sconfitta */
+                return OUTCOME_DEFEAT; /* Sconfitta */
             } else if (strncmp(line, "YOUR_TURN", 9) == 0) {
                 my_turn = true;
             }
         }
     }
 
-    return 0;
+    return OUTCOME_ERROR;
 }
 
-/* Gestione richiesta di rivincita a fine partita */
-static bool ask_rematch(int sock) {
-    printf("\nVuoi disputare una NUOVA SFIDA (rivincita) con lo stesso avversario?\n");
-    printf("  1) Sì, rivincita!\n");
+/* Gestione richiesta di rivincita a fine partita con multiplazione I/O tramite select() */
+static bool ask_rematch(int sock, const char *opponent_nick) {
+    printf("\n\033[1;36m============================================================\033[0m\n");
+    printf("Vuoi disputare una NUOVA SFIDA (rivincita) con \033[1;35m%s\033[0m?\n",
+           opponent_nick ? opponent_nick : "l'avversario");
+    printf("  1) Sì, richiedi rivincita!\n");
     printf("  2) No, torna alla lobby principale\n");
+    printf("Scelta (1 o 2): ");
+    fflush(stdout);
 
-    int choice = 2;
-    if (get_valid_int("Scelta (1 o 2): ", 1, 2, &choice) < 0) return false;
+    fd_set readfds;
+    char line[BUFFER_SIZE];
+    bool rematch_requested = false;
 
-    if (choice == 1) {
-        send_line(sock, "REMATCH 1");
-        printf("\nRichiesta di rivincita inviata! In attesa della risposta dell'avversario...\n");
+    while (g_client_running) {
+        FD_ZERO(&readfds);
+        FD_SET(STDIN_FILENO, &readfds);
+        FD_SET(sock, &readfds);
+        int maxfd = (sock > STDIN_FILENO) ? sock : STDIN_FILENO;
 
-        char line[BUFFER_SIZE];
-        while (g_client_running) {
-            if (read_server_line(sock, line, sizeof(line)) < 0) return false;
+        int ret = select(maxfd + 1, &readfds, NULL, NULL, NULL);
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
 
-            if (strncmp(line, "REMATCH_RESULT ACCEPTED", 23) == 0) {
+        /* 1) Notifiche dal server via socket */
+        if (FD_ISSET(sock, &readfds)) {
+            if (read_server_line(sock, line, sizeof(line)) < 0) {
+                return false;
+            }
+
+            if (strncmp(line, "REMATCH_OFFERED", 15) == 0) {
+                printf("\n\n\033[1;32m>>> [SFIDA RICEVUTA] %s desidera una rivincita! <<<\033[0m\n",
+                       opponent_nick ? opponent_nick : "L'avversario");
+                printf("Vuoi accettare la sfida? (1 = Accetta, 2 = Rifiuta ed esci): ");
+                fflush(stdout);
+            } else if (strncmp(line, "REMATCH_RESULT ACCEPTED", 23) == 0) {
                 printf("\n\033[1;32m[OK] Entrambi avete accettato la rivincita! Si ricomincia!\033[0m\n");
-                /* Leggi l'eventuale START_PLACEMENT */
+                /* Leggi l'eventuale START_PLACEMENT che segue */
                 read_server_line(sock, line, sizeof(line));
                 return true;
             } else if (strncmp(line, "REMATCH_RESULT DECLINED", 23) == 0) {
-                printf("\n\033[1;33m[!] L'avversario ha rifiutato la rivincita. Ritorno alla lobby.\033[0m\n");
+                printf("\n\033[1;33m[!] %s ha rifiutato la rivincita / abbandonato la stanza. Ritorno alla lobby.\033[0m\n",
+                       opponent_nick ? opponent_nick : "L'avversario");
                 return false;
+            } else if (strncmp(line, "OPPONENT_DISCONNECTED", 21) == 0) {
+                printf("\n\033[1;31m[!] L'avversario si è disconnesso dal server. Ritorno alla lobby.\033[0m\n");
+                return false;
+            } else if (strncmp(line, "OK", 2) == 0) {
+                /* Acknowledge dal server, continuiamo ad attendere l'avversario */
+                continue;
             }
         }
-    } else {
-        send_line(sock, "REMATCH 0");
-        char line[BUFFER_SIZE];
-        read_server_line(sock, line, sizeof(line));
+
+        /* 2) Input da terminale (attivo solo se l'utente non ha ancora inviato la sua scelta) */
+        if (!rematch_requested && FD_ISSET(STDIN_FILENO, &readfds)) {
+            char input[64];
+            if (safe_read_line(input, sizeof(input)) < 0) return false;
+            char *trimmed = trim_whitespace(input);
+            if (!trimmed || strlen(trimmed) == 0) {
+                printf("Scelta (1 o 2): ");
+                fflush(stdout);
+                continue;
+            }
+
+            if (strcmp(trimmed, "1") == 0) {
+                send_line(sock, "REMATCH 1");
+                rematch_requested = true;
+                printf("\n\033[1;36m[i] Richiesta di rivincita inviata! In attesa della risposta di %s...\033[0m\n",
+                       opponent_nick ? opponent_nick : "avversario");
+                fflush(stdout);
+            } else if (strcmp(trimmed, "2") == 0) {
+                send_line(sock, "REMATCH 0");
+                printf("\nRivincita rifiutata. Ritorno alla lobby.\n");
+                char resp[BUFFER_SIZE];
+                read_server_line(sock, resp, sizeof(resp));
+                return false;
+            } else {
+                printf("\033[1;31m[!] Scelta non valida. Inserisci 1 (Rivincita) o 2 (Lobby): \033[0m");
+                fflush(stdout);
+            }
+        }
     }
 
     return false;
@@ -488,10 +551,10 @@ static void run_game_session(int sock, const char *opponent_nick, bool start_my_
 
         int outcome = run_combat_loop(sock, &my_board, opponent_nick, start_my_turn);
 
-        if (outcome == 2) {
+        if (outcome == OUTCOME_FORFEIT_WIN) {
             /* Vittoria a tavolino per abbandono dell'avversario: nessuna rivincita possibile */
             return;
-        } else if (outcome == 3) {
+        } else if (outcome == OUTCOME_WAIT_NEW_CHALLENGER) {
             /* Giocatore superstite ha scelto di attendere un nuovo sfidante nella stanza */
             host_wait_for_challenger(sock);
             return;
@@ -499,8 +562,8 @@ static void run_game_session(int sock, const char *opponent_nick, bool start_my_
             return;
         }
 
-        /* Offerta rivincita: SOLO se la partita si è conclusa regolarmente sul campo (outcome == 1) */
-        if (!ask_rematch(sock)) {
+        /* Offerta rivincita: sia per vittoria normale che per sconfitta sul campo */
+        if (!ask_rematch(sock, opponent_nick)) {
             break;
         }
     }

@@ -438,9 +438,10 @@ def build_pdf(filename):
         "  - <b>Opzione 2 (Attesa nuovo giocatore):</b> la stanza viene resettata e rimessa nello stato di attesa (<code>STATE_WAITING_OPPONENT</code>), permettendo a un nuovo utente collegato di unirsi alla partita.",
         bullet_style
     ))
-    story.append(Paragraph("<b>Meccanismo di Rivincita (Rematch):</b>", h2_style))
+    story.append(Paragraph("<b>Meccanismo di Rivincita (Rematch) con Multiplexing I/O:</b>", h2_style))
     story.append(Paragraph(
-        "Al termine della sfida, entrambi i giocatori possono esprimere la preferenza di disputare una nuova partita mantenendo la stessa coppia. "
+        "Al termine della sfida, entrambi i giocatori possono esprimere la preferenza di disputare una nuova partita. "
+        "L'interfaccia client sfrutta la system call <code>select()</code> per monitorare sia la tastiera che la socket: se un giocatore propone la rivincita per primo, il server trasmette la notifica <code>REMATCH_OFFERED</code> che appare istantaneamente sullo schermo dell'avversario. "
         "Se entrambi accettano (<code>REMATCH 1</code>), il server azzera le scacchiere e riavvia la fase di piazzamento; qualora uno dei due rifiuti (<code>REMATCH 0</code>), entrambi vengono reindirizzati alla lobby principale in totale coerenza di stato.",
         body_style
     ))

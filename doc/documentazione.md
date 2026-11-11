@@ -185,10 +185,11 @@ In accordo con la specifica opzionale della traccia (pagina 3):
   1. **Terminare la partita con vittoria a tavolino:** la sessione viene conclusa con vittoria per forfait e il giocatore torna alla lobby principale; in questo scenario la richiesta di rivincita viene naturalmente inibita dal sistema, non essendo più presente l'avversario.
   2. **Attendere un nuovo giocatore nella stanza:** la stanza viene reimpostata in stato di attesa (`STATE_WAITING_OPPONENT`), consentendo a un altro utente della lobby di unirsi.
 
-### 9.2 Meccanismo di Rivincita (Rematch)
+### 9.2 Meccanismo di Rivincita (Rematch) con Multiplexing I/O
 Al termine del match, entrambi i partecipanti possono scegliere se disputare una nuova sfida:
-- Se entrambi votano per la rivincita (`REMATCH 1`), il server azzera le scacchiere e riavvia la fase di posizionamento con la stessa coppia di giocatori.
-- Se uno dei due rifiuta (`REMATCH 0`), entrambi tornano alla lobby principale e la stanza viene liberata.
+- La fase decisionale della rivincita adotta la multiplazione I/O tramite la system call `select()`, monitorando sia il canale socket che lo standard input (`stdin`). Se un giocatore invia per primo la richiesta di rivincita (`REMATCH 1`), il server inoltra tempestivamente all'avversario il messaggio `REMATCH_OFFERED`; il client dell'avversario visualizza la notifica a video in tempo reale senza dover attendere un invio da tastiera.
+- Se entrambi votano per la rivincita (`REMATCH 1`), il server azzera le scacchiere e riavvia la fase di posizionamento con la medesima coppia di giocatori.
+- Se uno dei due partecipanti rifiuta (`REMATCH 0`) o abbandona la sessione, la stanza viene chiusa e i client vengono riaccompagnati alla lobby principale.
 
 ---
 
