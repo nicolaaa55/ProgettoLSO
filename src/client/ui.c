@@ -84,3 +84,79 @@ void ui_print_boards(const Board *my_board, CellState opp_radar[BOARD_SIZE][BOAR
 
     printf("\n Legenda: \033[1;32mS\033[0m=Tua Nave  \033[0;34m~\033[0m=Mare  \033[1;31mX\033[0m=Nave Colpita  \033[0;37mO\033[0m=Acqua  \033[1;41;37m*\033[0m=Affondata\n");
 }
+
+void ui_mark_sunk_on_radar(CellState opp_radar[BOARD_SIZE][BOARD_SIZE],
+                           int shot_r, int shot_c,
+                           int sunk_r, int sunk_c, int sunk_len, int sunk_dir) {
+    if (!opp_radar) return;
+
+    /* 1) Applicazione metadati precisi del server */
+    if (sunk_len > 0 && sunk_r >= 0 && sunk_r < BOARD_SIZE && sunk_c >= 0 && sunk_c < BOARD_SIZE) {
+        bool is_vert = (sunk_dir == DIR_VERTICAL || sunk_dir == DIR_DOWN || sunk_dir == DIR_UP);
+        for (int i = 0; i < sunk_len; i++) {
+            int r = is_vert ? (sunk_r + i) : sunk_r;
+            int c = is_vert ? sunk_c : (sunk_c + i);
+            if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
+                opp_radar[r][c] = CELL_SUNK;
+            }
+        }
+    }
+
+    /* 2) Marcatura della cella del colpo che ha causato l'affondamento */
+    if (shot_r >= 0 && shot_r < BOARD_SIZE && shot_c >= 0 && shot_c < BOARD_SIZE) {
+        opp_radar[shot_r][shot_c] = CELL_SUNK;
+
+        /* 3) Scansione robusta: converte eventuali celle CELL_HIT ('X') contigue in CELL_SUNK ('*') */
+        for (int c = shot_c - 1; c >= 0 && opp_radar[shot_r][c] == CELL_HIT; c--) {
+            opp_radar[shot_r][c] = CELL_SUNK;
+        }
+        for (int c = shot_c + 1; c < BOARD_SIZE && opp_radar[shot_r][c] == CELL_HIT; c++) {
+            opp_radar[shot_r][c] = CELL_SUNK;
+        }
+        for (int r = shot_r - 1; r >= 0 && opp_radar[r][shot_c] == CELL_HIT; r--) {
+            opp_radar[r][shot_c] = CELL_SUNK;
+        }
+        for (int r = shot_r + 1; r < BOARD_SIZE && opp_radar[r][shot_c] == CELL_HIT; r++) {
+            opp_radar[r][shot_c] = CELL_SUNK;
+        }
+    }
+}
+
+void ui_mark_sunk_on_board(Board *my_board,
+                           int shot_r, int shot_c,
+                           int sunk_r, int sunk_c, int sunk_len, int sunk_dir) {
+    if (!my_board) return;
+
+    /* 1) Ricerca nave colpita tramite ship_map */
+    int hit_ship_idx = -1;
+    if (shot_r >= 0 && shot_r < BOARD_SIZE && shot_c >= 0 && shot_c < BOARD_SIZE) {
+        hit_ship_idx = my_board->ship_map[shot_r][shot_c];
+    }
+
+    if (hit_ship_idx >= 0 && hit_ship_idx < NUM_SHIPS) {
+        Ship *s = &my_board->ships[hit_ship_idx];
+        s->sunk = true;
+        for (int i = 0; i < s->size; i++) {
+            int r = (s->dir == DIR_VERTICAL) ? (s->row + i) : s->row;
+            int c = (s->dir == DIR_HORIZONTAL) ? (s->col + i) : (s->col + i);
+            if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
+                my_board->grid[r][c] = CELL_SUNK;
+            }
+        }
+        return;
+    }
+
+    /* 2) Fallback con metadati server */
+    if (sunk_len > 0 && sunk_r >= 0 && sunk_r < BOARD_SIZE && sunk_c >= 0 && sunk_c < BOARD_SIZE) {
+        bool is_vert = (sunk_dir == DIR_VERTICAL || sunk_dir == DIR_DOWN || sunk_dir == DIR_UP);
+        for (int i = 0; i < sunk_len; i++) {
+            int r = is_vert ? (sunk_r + i) : sunk_r;
+            int c = is_vert ? sunk_c : (sunk_c + i);
+            if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
+                my_board->grid[r][c] = CELL_SUNK;
+            }
+        }
+    } else if (shot_r >= 0 && shot_r < BOARD_SIZE && shot_c >= 0 && shot_c < BOARD_SIZE) {
+        my_board->grid[shot_r][shot_c] = CELL_SUNK;
+    }
+}

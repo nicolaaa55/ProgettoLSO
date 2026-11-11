@@ -141,81 +141,107 @@ static int get_valid_coords_multiplex(int sock, const char *prompt, int *out_row
     return -1;
 }
 
-/* Converte tutte le celle della nave affondata su opp_radar in CELL_SUNK */
-static void mark_sunk_on_radar(CellState opp_radar[BOARD_SIZE][BOARD_SIZE],
-                               int shot_r, int shot_c,
-                               int sunk_r, int sunk_c, int sunk_len, int sunk_dir) {
-    /* 1) Se abbiamo i metadati canonici dal server, li applichiamo direttamente */
-    if (sunk_len > 0 && sunk_r >= 0 && sunk_r < BOARD_SIZE && sunk_c >= 0 && sunk_c < BOARD_SIZE) {
-        bool is_vert = (sunk_dir == DIR_VERTICAL || sunk_dir == DIR_DOWN || sunk_dir == DIR_UP);
-        for (int i = 0; i < sunk_len; i++) {
-            int r = is_vert ? (sunk_r + i) : sunk_r;
-            int c = is_vert ? sunk_c : (sunk_c + i);
-            if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
-                opp_radar[r][c] = CELL_SUNK;
-            }
-        }
-    }
+/* Selezione interattiva dell'orientamento e direzione della nave */
+static int select_ship_direction(int sock, const Board *my_board, int ship_idx, int r, int c,
+                                 ShipDirection *out_dir, char *out_dir_c) {
+    char dir_buf[32];
+    while (g_client_running) {
+        printf("Orientamento [H = Orizzontale, V = Verticale]: ");
+        fflush(stdout);
+        int dr = safe_read_line_multiplex(sock, dir_buf, sizeof(dir_buf));
+        if (dr == -2) return -2;
+        if (dr < 0) return -1;
+        char *td = trim_whitespace(dir_buf);
+        if (!td || strlen(td) == 0) continue;
+        char choice = (char)toupper((unsigned char)td[0]);
 
-    /* 2) Marcatura della cella del colpo che ha causato l'affondamento */
-    if (shot_r >= 0 && shot_r < BOARD_SIZE && shot_c >= 0 && shot_c < BOARD_SIZE) {
-        opp_radar[shot_r][shot_c] = CELL_SUNK;
+        if (choice == 'H') {
+            bool can_right = board_can_place_ship(my_board, ship_idx, r, c, DIR_RIGHT, NULL);
+            bool can_left  = board_can_place_ship(my_board, ship_idx, r, c, DIR_LEFT, NULL);
 
-        /* 3) Scansione di sicurezza robusta: converte qualsiasi CELL_HIT ('X') contigua in CELL_SUNK ('*') */
-        for (int c = shot_c - 1; c >= 0 && opp_radar[shot_r][c] == CELL_HIT; c--) {
-            opp_radar[shot_r][c] = CELL_SUNK;
-        }
-        for (int c = shot_c + 1; c < BOARD_SIZE && opp_radar[shot_r][c] == CELL_HIT; c++) {
-            opp_radar[shot_r][c] = CELL_SUNK;
-        }
-        for (int r = shot_r - 1; r >= 0 && opp_radar[r][shot_c] == CELL_HIT; r--) {
-            opp_radar[r][shot_c] = CELL_SUNK;
-        }
-        for (int r = shot_r + 1; r < BOARD_SIZE && opp_radar[r][shot_c] == CELL_HIT; r++) {
-            opp_radar[r][shot_c] = CELL_SUNK;
-        }
-    }
-}
-
-/* Converte tutte le celle della nave affondata sulla propria griglia in CELL_SUNK */
-static void mark_sunk_on_my_board(Board *my_board, int shot_r, int shot_c,
-                                  int sunk_r, int sunk_c, int sunk_len, int sunk_dir) {
-    if (!my_board) return;
-
-    /* 1) Usa la ship_map locale della propria flotta per massima fedeltà */
-    if (shot_r >= 0 && shot_r < BOARD_SIZE && shot_c >= 0 && shot_c < BOARD_SIZE) {
-        int ship_idx = my_board->ship_map[shot_r][shot_c];
-        if (ship_idx >= 0 && ship_idx < NUM_SHIPS) {
-            int sr = my_board->ships[ship_idx].row;
-            int sc = my_board->ships[ship_idx].col;
-            int slen = my_board->ships[ship_idx].size;
-            bool is_vert = (my_board->ships[ship_idx].dir == DIR_VERTICAL ||
-                            my_board->ships[ship_idx].dir == DIR_DOWN ||
-                            my_board->ships[ship_idx].dir == DIR_UP);
-            for (int i = 0; i < slen; i++) {
-                int r = is_vert ? (sr + i) : sr;
-                int c = is_vert ? sc : (sc + i);
-                if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
-                    my_board->grid[r][c] = CELL_SUNK;
+            if (can_right && can_left) {
+                while (1) {
+                    printf("  Direzione orizzontale [D = Verso Destra, S = Verso Sinistra]: ");
+                    fflush(stdout);
+                    int sdr = safe_read_line_multiplex(sock, dir_buf, sizeof(dir_buf));
+                    if (sdr == -2) return -2;
+                    if (sdr < 0) return -1;
+                    char *sub = trim_whitespace(dir_buf);
+                    if (sub && (toupper((unsigned char)sub[0]) == 'D' || toupper((unsigned char)sub[0]) == 'R')) {
+                        *out_dir = DIR_RIGHT;
+                        *out_dir_c = 'D';
+                        return 1;
+                    } else if (sub && (toupper((unsigned char)sub[0]) == 'S' || toupper((unsigned char)sub[0]) == 'L')) {
+                        *out_dir = DIR_LEFT;
+                        *out_dir_c = 'S';
+                        return 1;
+                    }
+                    printf("\033[1;31m  [!] Inserisci D per Destra o S per Sinistra.\033[0m\n");
                 }
+            } else if (can_right) {
+                printf("\033[1;36m  [i] Verso sinistra non c'è spazio: posizionamento automatico verso Destra.\033[0m\n");
+                *out_dir = DIR_RIGHT;
+                *out_dir_c = 'D';
+                return 1;
+            } else if (can_left) {
+                printf("\033[1;36m  [i] Verso destra non c'è spazio: posizionamento automatico verso Sinistra.\033[0m\n");
+                *out_dir = DIR_LEFT;
+                *out_dir_c = 'S';
+                return 1;
+            } else {
+                printf("\033[1;31m[!] Nessuna direzione orizzontale valida (Destra o Sinistra) da questa coordinata.\033[0m\n");
+                return 0;
             }
-            return;
-        }
-    }
+        } else if (choice == 'V') {
+            bool can_down = board_can_place_ship(my_board, ship_idx, r, c, DIR_DOWN, NULL);
+            bool can_up   = board_can_place_ship(my_board, ship_idx, r, c, DIR_UP, NULL);
 
-    /* 2) Fallback con metadati server */
-    if (sunk_len > 0 && sunk_r >= 0 && sunk_r < BOARD_SIZE && sunk_c >= 0 && sunk_c < BOARD_SIZE) {
-        bool is_vert = (sunk_dir == DIR_VERTICAL || sunk_dir == DIR_DOWN || sunk_dir == DIR_UP);
-        for (int i = 0; i < sunk_len; i++) {
-            int r = is_vert ? (sunk_r + i) : sunk_r;
-            int c = is_vert ? sunk_c : (sunk_c + i);
-            if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
-                my_board->grid[r][c] = CELL_SUNK;
+            if (can_down && can_up) {
+                while (1) {
+                    printf("  Direzione verticale [B = Verso il Basso, A = Verso l'Alto]: ");
+                    fflush(stdout);
+                    int sdr = safe_read_line_multiplex(sock, dir_buf, sizeof(dir_buf));
+                    if (sdr == -2) return -2;
+                    if (sdr < 0) return -1;
+                    char *sub = trim_whitespace(dir_buf);
+                    if (sub && (toupper((unsigned char)sub[0]) == 'B' || toupper((unsigned char)sub[0]) == 'V')) {
+                        *out_dir = DIR_DOWN;
+                        *out_dir_c = 'B';
+                        return 1;
+                    } else if (sub && (toupper((unsigned char)sub[0]) == 'A' || toupper((unsigned char)sub[0]) == 'U')) {
+                        *out_dir = DIR_UP;
+                        *out_dir_c = 'A';
+                        return 1;
+                    }
+                    printf("\033[1;31m  [!] Inserisci B per Basso o A per Alto.\033[0m\n");
+                }
+            } else if (can_down) {
+                printf("\033[1;36m  [i] Verso l'alto non c'è spazio: posizionamento automatico verso il Basso.\033[0m\n");
+                *out_dir = DIR_DOWN;
+                *out_dir_c = 'B';
+                return 1;
+            } else if (can_up) {
+                printf("\033[1;36m  [i] Verso il basso non c'è spazio: posizionamento automatico verso l'Alto.\033[0m\n");
+                *out_dir = DIR_UP;
+                *out_dir_c = 'A';
+                return 1;
+            } else {
+                printf("\033[1;31m[!] Nessuna direzione verticale valida (In alto o In basso) da questa coordinata.\033[0m\n");
+                return 0;
             }
+        } else if (choice == 'D') {
+            *out_dir = DIR_RIGHT; *out_dir_c = 'D'; return 1;
+        } else if (choice == 'S') {
+            *out_dir = DIR_LEFT; *out_dir_c = 'S'; return 1;
+        } else if (choice == 'B') {
+            *out_dir = DIR_DOWN; *out_dir_c = 'B'; return 1;
+        } else if (choice == 'A') {
+            *out_dir = DIR_UP; *out_dir_c = 'A'; return 1;
+        } else {
+            printf("\033[1;31m[!] Scelta non valida. Inserisci H per orizzontale o V per verticale.\033[0m\n");
         }
-    } else if (shot_r >= 0 && shot_r < BOARD_SIZE && shot_c >= 0 && shot_c < BOARD_SIZE) {
-        my_board->grid[shot_r][shot_c] = CELL_SUNK;
     }
+    return -1;
 }
 
 /* Gestione piazzamento navi */
@@ -279,115 +305,12 @@ static int do_ship_placement(int sock, Board *my_board) {
             if (cr == -2) return -2;
             if (cr < 0) return -1;
 
-            char dir_buf[32];
             ShipDirection dir = DIR_HORIZONTAL;
             char dir_c = 'H';
-            bool orientation_chosen = false;
-
-            while (!orientation_chosen && g_client_running) {
-                printf("Orientamento [H = Orizzontale, V = Verticale]: ");
-                fflush(stdout);
-                int dr = safe_read_line_multiplex(sock, dir_buf, sizeof(dir_buf));
-                if (dr == -2) return -2;
-                if (dr < 0) return -1;
-                char *td = trim_whitespace(dir_buf);
-                if (!td || strlen(td) == 0) continue;
-                char choice = (char)toupper((unsigned char)td[0]);
-
-                if (choice == 'H') {
-                    bool can_right = board_can_place_ship(my_board, i, r, c, DIR_RIGHT, NULL);
-                    bool can_left  = board_can_place_ship(my_board, i, r, c, DIR_LEFT, NULL);
-
-                    if (can_right && can_left) {
-                        /* Vi è la possibilità di scegliere entrambi: chiediamo all'utente */
-                        while (1) {
-                            printf("  Direzione orizzontale [D = Verso Destra, S = Verso Sinistra]: ");
-                            fflush(stdout);
-                            int sdr = safe_read_line_multiplex(sock, dir_buf, sizeof(dir_buf));
-                            if (sdr == -2) return -2;
-                            if (sdr < 0) return -1;
-                            char *sub = trim_whitespace(dir_buf);
-                            if (sub && (toupper((unsigned char)sub[0]) == 'D' || toupper((unsigned char)sub[0]) == 'R')) {
-                                dir = DIR_RIGHT;
-                                dir_c = 'D';
-                                break;
-                            } else if (sub && (toupper((unsigned char)sub[0]) == 'S' || toupper((unsigned char)sub[0]) == 'L')) {
-                                dir = DIR_LEFT;
-                                dir_c = 'S';
-                                break;
-                            }
-                            printf("\033[1;31m  [!] Inserisci D per Destra o S per Sinistra.\033[0m\n");
-                        }
-                        orientation_chosen = true;
-                    } else if (can_right) {
-                        printf("\033[1;36m  [i] Verso sinistra non c'è spazio: posizionamento automatico verso Destra.\033[0m\n");
-                        dir = DIR_RIGHT;
-                        dir_c = 'D';
-                        orientation_chosen = true;
-                    } else if (can_left) {
-                        printf("\033[1;36m  [i] Verso destra non c'è spazio: posizionamento automatico verso Sinistra.\033[0m\n");
-                        dir = DIR_LEFT;
-                        dir_c = 'S';
-                        orientation_chosen = true;
-                    } else {
-                        printf("\033[1;31m[!] Nessuna direzione orizzontale valida (Destra o Sinistra) da questa coordinata.\033[0m\n");
-                        break;
-                    }
-                } else if (choice == 'V') {
-                    bool can_down = board_can_place_ship(my_board, i, r, c, DIR_DOWN, NULL);
-                    bool can_up   = board_can_place_ship(my_board, i, r, c, DIR_UP, NULL);
-
-                    if (can_down && can_up) {
-                        /* Vi è la possibilità di scegliere entrambi: chiediamo all'utente */
-                        while (1) {
-                            printf("  Direzione verticale [B = Verso il Basso, A = Verso l'Alto]: ");
-                            fflush(stdout);
-                            int sdr = safe_read_line_multiplex(sock, dir_buf, sizeof(dir_buf));
-                            if (sdr == -2) return -2;
-                            if (sdr < 0) return -1;
-                            char *sub = trim_whitespace(dir_buf);
-                            if (sub && (toupper((unsigned char)sub[0]) == 'B' || toupper((unsigned char)sub[0]) == 'V')) {
-                                dir = DIR_DOWN;
-                                dir_c = 'B';
-                                break;
-                            } else if (sub && (toupper((unsigned char)sub[0]) == 'A' || toupper((unsigned char)sub[0]) == 'U')) {
-                                dir = DIR_UP;
-                                dir_c = 'A';
-                                break;
-                            }
-                            printf("\033[1;31m  [!] Inserisci B per Basso o A per Alto.\033[0m\n");
-                        }
-                        orientation_chosen = true;
-                    } else if (can_down) {
-                        printf("\033[1;36m  [i] Verso l'alto non c'è spazio: posizionamento automatico verso il Basso.\033[0m\n");
-                        dir = DIR_DOWN;
-                        dir_c = 'B';
-                        orientation_chosen = true;
-                    } else if (can_up) {
-                        printf("\033[1;36m  [i] Verso il basso non c'è spazio: posizionamento automatico verso l'Alto.\033[0m\n");
-                        dir = DIR_UP;
-                        dir_c = 'A';
-                        orientation_chosen = true;
-                    } else {
-                        printf("\033[1;31m[!] Nessuna direzione verticale valida (In alto o In basso) da questa coordinata.\033[0m\n");
-                        break;
-                    }
-                } else if (choice == 'D') {
-                    dir = DIR_RIGHT; dir_c = 'D'; orientation_chosen = true;
-                } else if (choice == 'S') {
-                    dir = DIR_LEFT; dir_c = 'S'; orientation_chosen = true;
-                } else if (choice == 'B') {
-                    dir = DIR_DOWN; dir_c = 'B'; orientation_chosen = true;
-                } else if (choice == 'A') {
-                    dir = DIR_UP; dir_c = 'A'; orientation_chosen = true;
-                } else {
-                    printf("\033[1;31m[!] Scelta non valida. Inserisci H per orizzontale o V per verticale.\033[0m\n");
-                }
-            }
-
-            if (!orientation_chosen) {
-                continue;
-            }
+            int s_ret = select_ship_direction(sock, my_board, i, r, c, &dir, &dir_c);
+            if (s_ret == -2) return -2;
+            if (s_ret < 0) return -1;
+            if (s_ret == 0) continue;
 
             const char *err = NULL;
             if (!board_can_place_ship(my_board, i, r, c, dir, &err)) {
@@ -458,6 +381,44 @@ static int handle_opponent_disconnected(int sock) {
     return choice;
 }
 
+/* Elabora e visualizza l'esito di un colpo navale (nostro o nemico) */
+static void handle_combat_shot_result(const char *line, const char *opponent_nick, bool is_my_shot,
+                                      Board *my_board, CellState opp_radar[BOARD_SIZE][BOARD_SIZE]) {
+    char shooter[32], outcome[32], ship_name[32];
+    int shot_r = -1, shot_c = -1, next_turn = 0;
+    int sunk_r = -1, sunk_c = -1, sunk_len = 0, sunk_dir = 0;
+    int parsed = sscanf(line, "SHOT_RESULT %31s %d %d %31s %31s %d %d %d %d %d",
+                        shooter, &shot_r, &shot_c, outcome, ship_name, &next_turn,
+                        &sunk_r, &sunk_c, &sunk_len, &sunk_dir);
+    if (parsed < 4) return;
+
+    if (is_my_shot) {
+        if (strcmp(outcome, "MISS") == 0) {
+            opp_radar[shot_r][shot_c] = CELL_MISS;
+            printf("\n\033[0;37m>>> ACQUA! Colpo a vuoto in %c%d <<<\033[0m\n", 'A' + shot_r, shot_c + 1);
+        } else if (strcmp(outcome, "HIT") == 0) {
+            opp_radar[shot_r][shot_c] = CELL_HIT;
+            printf("\n\033[1;31m>>> COLPITO! Nave nemica centrata in %c%d! <<<\033[0m\n", 'A' + shot_r, shot_c + 1);
+        } else if (strcmp(outcome, "SUNK") == 0) {
+            ui_mark_sunk_on_radar(opp_radar, shot_r, shot_c, sunk_r, sunk_c, sunk_len, sunk_dir);
+            printf("\n\033[1;41;37m>>> COLPITO E AFFONDATO! Hai affondato: %s! <<<\033[0m\n", ship_name);
+        }
+    } else {
+        if (strcmp(outcome, "MISS") == 0) {
+            if (my_board->grid[shot_r][shot_c] == CELL_EMPTY) {
+                my_board->grid[shot_r][shot_c] = CELL_MISS;
+            }
+            printf("\n\033[0;37m>>> %s ha sparato in %c%d: ACQUA! <<<\033[0m\n", opponent_nick, 'A' + shot_r, shot_c + 1);
+        } else if (strcmp(outcome, "HIT") == 0) {
+            my_board->grid[shot_r][shot_c] = CELL_HIT;
+            printf("\n\033[1;31m>>> ALLARME! %s ha COLPITO una tua nave in %c%d! <<<\033[0m\n", opponent_nick, 'A' + shot_r, shot_c + 1);
+        } else if (strcmp(outcome, "SUNK") == 0) {
+            ui_mark_sunk_on_board(my_board, shot_r, shot_c, sunk_r, sunk_c, sunk_len, sunk_dir);
+            printf("\n\033[1;41;37m>>> AFFONDATA! La tua nave '%s' è stata affondata da %s! <<<\033[0m\n", ship_name, opponent_nick);
+        }
+    }
+}
+
 /* Ciclo di combattimento a turni */
 static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick, bool start_my_turn) {
     CellState opp_radar[BOARD_SIZE][BOARD_SIZE];
@@ -506,24 +467,7 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
                 return OUTCOME_ERROR;
             }
 
-            char shooter[32], outcome[32], ship_name[32];
-            int shot_r = -1, shot_c = -1, next_turn = 0;
-            int sunk_r = -1, sunk_c = -1, sunk_len = 0, sunk_dir = 0;
-            int parsed = sscanf(line, "SHOT_RESULT %31s %d %d %31s %31s %d %d %d %d %d",
-                                shooter, &shot_r, &shot_c, outcome, ship_name, &next_turn,
-                                &sunk_r, &sunk_c, &sunk_len, &sunk_dir);
-            if (parsed >= 4) {
-                if (strcmp(outcome, "MISS") == 0) {
-                    opp_radar[shot_r][shot_c] = CELL_MISS;
-                    printf("\n\033[0;37m>>> ACQUA! Colpo a vuoto in %c%d <<<\033[0m\n", 'A' + shot_r, shot_c + 1);
-                } else if (strcmp(outcome, "HIT") == 0) {
-                    opp_radar[shot_r][shot_c] = CELL_HIT;
-                    printf("\n\033[1;31m>>> COLPITO! Nave nemica centrata in %c%d! <<<\033[0m\n", 'A' + shot_r, shot_c + 1);
-                } else if (strcmp(outcome, "SUNK") == 0) {
-                    mark_sunk_on_radar(opp_radar, shot_r, shot_c, sunk_r, sunk_c, sunk_len, sunk_dir);
-                    printf("\n\033[1;41;37m>>> COLPITO E AFFONDATO! Hai affondato: %s! <<<\033[0m\n", ship_name);
-                }
-            }
+            handle_combat_shot_result(line, opponent_nick, true, my_board, opp_radar);
 
             /* Controlla prossimo messaggio (GAME_OVER, OPPONENT_DISCONNECTED o WAIT_TURN) */
             if (read_server_line(sock, line, sizeof(line)) < 0) return OUTCOME_ERROR;
@@ -558,26 +502,7 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
                 return OUTCOME_ERROR;
             }
 
-            char shooter[32], outcome[32], ship_name[32];
-            int shot_r = -1, shot_c = -1, next_turn = 0;
-            int sunk_r = -1, sunk_c = -1, sunk_len = 0, sunk_dir = 0;
-            int parsed = sscanf(line, "SHOT_RESULT %31s %d %d %31s %31s %d %d %d %d %d",
-                                shooter, &shot_r, &shot_c, outcome, ship_name, &next_turn,
-                                &sunk_r, &sunk_c, &sunk_len, &sunk_dir);
-            if (parsed >= 4) {
-                if (strcmp(outcome, "MISS") == 0) {
-                    if (my_board->grid[shot_r][shot_c] == CELL_EMPTY) {
-                        my_board->grid[shot_r][shot_c] = CELL_MISS;
-                    }
-                    printf("\n\033[0;37m>>> %s ha sparato in %c%d: ACQUA! <<<\033[0m\n", opponent_nick, 'A' + shot_r, shot_c + 1);
-                } else if (strcmp(outcome, "HIT") == 0) {
-                    my_board->grid[shot_r][shot_c] = CELL_HIT;
-                    printf("\n\033[1;31m>>> ALLARME! %s ha COLPITO una tua nave in %c%d! <<<\033[0m\n", opponent_nick, 'A' + shot_r, shot_c + 1);
-                } else if (strcmp(outcome, "SUNK") == 0) {
-                    mark_sunk_on_my_board(my_board, shot_r, shot_c, sunk_r, sunk_c, sunk_len, sunk_dir);
-                    printf("\n\033[1;41;37m>>> AFFONDATA! La tua nave '%s' è stata affondata da %s! <<<\033[0m\n", ship_name, opponent_nick);
-                }
-            }
+            handle_combat_shot_result(line, opponent_nick, false, my_board, opp_radar);
 
             /* Controlla prossimo messaggio (GAME_OVER, OPPONENT_DISCONNECTED o YOUR_TURN) */
             if (read_server_line(sock, line, sizeof(line)) < 0) return OUTCOME_ERROR;
