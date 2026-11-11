@@ -142,16 +142,18 @@ void lobby_send_games_list(ClientSession *client) {
     pthread_mutex_lock(&g_lobby_mutex);
     int count = 0;
     for (int i = 0; i < MAX_GAMES; i++) {
-        if (g_games[i].in_use && g_games[i].guest == NULL && g_games[i].pending_challenger == NULL) {
+        if (g_games[i].in_use && g_games[i].host && g_games[i].host->active &&
+            g_games[i].guest == NULL && g_games[i].pending_challenger == NULL) {
             count++;
         }
     }
 
     client_send(client, "GAMES_LIST_START %d", count);
     for (int i = 0; i < MAX_GAMES; i++) {
-        if (g_games[i].in_use && g_games[i].guest == NULL && g_games[i].pending_challenger == NULL) {
+        if (g_games[i].in_use && g_games[i].host && g_games[i].host->active &&
+            g_games[i].guest == NULL && g_games[i].pending_challenger == NULL) {
             client_send(client, "GAME_ITEM %d %s %s", g_games[i].id, g_games[i].name,
-                        g_games[i].host ? g_games[i].host->nickname : "Unknown");
+                        g_games[i].host->nickname);
         }
     }
     client_send(client, "GAMES_LIST_END");
@@ -182,6 +184,13 @@ bool lobby_request_join(ClientSession *guest, int game_id, const char **err_msg)
         return false;
     }
 
+    if (!g->host || !g->host->active) {
+        pthread_mutex_unlock(&g->lock);
+        pthread_mutex_unlock(&g_lobby_mutex);
+        if (err_msg) *err_msg = "L'host della partita non è più connesso.";
+        return false;
+    }
+
     if (g->guest != NULL) {
         pthread_mutex_unlock(&g->lock);
         pthread_mutex_unlock(&g_lobby_mutex);
@@ -190,10 +199,14 @@ bool lobby_request_join(ClientSession *guest, int game_id, const char **err_msg)
     }
 
     if (g->pending_challenger != NULL) {
-        pthread_mutex_unlock(&g->lock);
-        pthread_mutex_unlock(&g_lobby_mutex);
-        if (err_msg) *err_msg = "Un altro giocatore ha già fatto richiesta per questa partita. Riprova tra poco.";
-        return false;
+        if (!g->pending_challenger->active) {
+            g->pending_challenger = NULL;
+        } else {
+            pthread_mutex_unlock(&g->lock);
+            pthread_mutex_unlock(&g_lobby_mutex);
+            if (err_msg) *err_msg = "Un altro giocatore ha già fatto richiesta per questa partita. Riprova tra poco.";
+            return false;
+        }
     }
 
     g->pending_challenger = guest;
@@ -222,10 +235,12 @@ bool lobby_handle_join_decision(ClientSession *host, bool accept, const char **e
 
     pthread_mutex_lock(&g->lock);
 
-    if (g->host != host || g->pending_challenger == NULL) {
+    if (g->host != host || g->pending_challenger == NULL || !g->pending_challenger->active) {
+        g->pending_challenger = NULL;
+        host->state = STATE_WAITING_OPPONENT;
         pthread_mutex_unlock(&g->lock);
         pthread_mutex_unlock(&g_lobby_mutex);
-        if (err_msg) *err_msg = "Nessuna richiesta di partecipazione in sospeso.";
+        if (err_msg) *err_msg = "Lo sfidante non è più connesso. La tua stanza è di nuovo aperta.";
         return false;
     }
 
@@ -343,14 +358,54 @@ void lobby_remove_client(ClientSession *client) {
                 /* Partita in corso o sfidante già accettato */
                 ClientSession *other = (client == g->host) ? g->guest : g->host;
                 if (other && other->active) {
-                    other->state = STATE_OPPONENT_LEFT;
-                    client_send(other, "OPPONENT_DISCONNECTED %s", client->nickname);
-                }
-                /* Se client era host, assegniamo ad interim NULL */
-                if (client == g->host) g->host = NULL;
-                if (client == g->guest) g->guest = NULL;
-                if (!g->host && !g->guest) {
-                    g->in_use = false;
+                    if (client == g->guest && (other->state == STATE_PLACING_SHIPS || other->state == STATE_PLACING_WAITING)) {
+                        /* Lo sfidante si disconnette durante il posizionamento: l'host rimane nella sua stanza in ascolto */
+                        g->guest = NULL;
+                        g->pending_challenger = NULL;
+                        board_reset(&g->host_board);
+                        board_reset(&g->guest_board);
+                        g->host_placement_done = false;
+                        g->guest_placement_done = false;
+                        g->game_over = false;
+                        g->winner = 0;
+                        g->current_turn = 1;
+                        g->host_rematch = -1;
+                        g->guest_rematch = -1;
+                        other->state = STATE_WAITING_OPPONENT;
+                        client_send(other, "OPPONENT_DISCONNECTED_PRE_COMBAT %s", client->nickname);
+                    } else if (client == g->host && (other->state == STATE_PLACING_SHIPS || other->state == STATE_PLACING_WAITING)) {
+                        /* L'host si disconnette durante il posizionamento: partita annullata e ospite torna alla lobby */
+                        g->in_use = false;
+                        g->host = NULL;
+                        g->guest = NULL;
+                        g->pending_challenger = NULL;
+                        other->state = STATE_LOBBY;
+                        other->active_game_id = -1;
+                        client_send(other, "ERR_GAME_CANCELLED L'host si è disconnesso prima dell'inizio della partita.");
+                    } else if (other->state == STATE_GAME_OVER) {
+                        /* Partita già conclusa: reset e ritorno alla lobby per l'altro giocatore */
+                        g->in_use = false;
+                        g->host = NULL;
+                        g->guest = NULL;
+                        other->state = STATE_LOBBY;
+                        other->active_game_id = -1;
+                        client_send(other, "OPPONENT_DISCONNECTED %s", client->nickname);
+                    } else {
+                        /* Combattimento in corso: opzione vittoria a tavolino o attesa nuovo sfidante */
+                        other->state = STATE_OPPONENT_LEFT;
+                        client_send(other, "OPPONENT_DISCONNECTED %s", client->nickname);
+                        if (client == g->host) g->host = NULL;
+                        if (client == g->guest) g->guest = NULL;
+                        if (!g->host && !g->guest) {
+                            g->in_use = false;
+                        }
+                    }
+                } else {
+                    if (client == g->host) g->host = NULL;
+                    if (client == g->guest) g->guest = NULL;
+                    if (!g->host && !g->guest) {
+                        g->in_use = false;
+                    }
                 }
             }
         }

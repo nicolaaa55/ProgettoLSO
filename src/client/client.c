@@ -40,9 +40,17 @@ enum CombatOutcome {
     OUTCOME_WAIT_NEW_CHALLENGER = 4
 };
 
-/* Prototipi funzioni mutualmente richiamate */
+enum GameSessionResult {
+    SESSION_ERROR = 0,
+    SESSION_LOBBY = 1,
+    SESSION_WAIT_NEW_CHALLENGER = 2
+};
+
+static char g_last_server_event[BUFFER_SIZE] = "";
+
+/* Prototipi funzioni */
 static void host_wait_for_challenger(int sock);
-static void run_game_session(int sock, const char *opponent_nick, bool start_my_turn);
+static int run_game_session(int sock, const char *opponent_nick, bool start_my_turn, bool is_host);
 static bool ask_rematch(int sock, const char *opponent_nick);
 static int handle_opponent_disconnected(int sock);
 
@@ -60,7 +68,7 @@ static int read_server_line(int sock, char *buf, size_t size) {
  * Ritorna:
  *   >= 0 : caratteri letti da stdin
  *   -1   : errore o chiusura stdin / interruzione
- *   -2   : l'avversario si è disconnesso (ricevuto OPPONENT_DISCONNECTED dal server)
+ *   -2   : l'avversario si è disconnesso o evento asincrono da server
  */
 static int safe_read_line_multiplex(int sock, char *buf, size_t size) {
     fd_set readfds;
@@ -80,6 +88,7 @@ static int safe_read_line_multiplex(int sock, char *buf, size_t size) {
             char smsg[BUFFER_SIZE];
             int n = recv_line(sock, smsg, sizeof(smsg));
             if (n <= 0) return -1;
+            safe_str_copy(g_last_server_event, smsg, sizeof(g_last_server_event));
             if (strncmp(smsg, "OPPONENT_DISCONNECTED", 21) == 0 ||
                 strncmp(smsg, "INFO", 4) == 0 ||
                 strncmp(smsg, "ERR_GAME_CANCELLED", 18) == 0 ||
@@ -239,13 +248,21 @@ static int do_ship_placement(int sock, Board *my_board) {
             send_line(sock, "PLACE_SHIP %d %d %d %c", i, my_board->ships[i].row, my_board->ships[i].col, dir_c);
             char resp[BUFFER_SIZE];
             if (read_server_line(sock, resp, sizeof(resp)) < 0) return -1;
-            if (strncmp(resp, "OPPONENT_DISCONNECTED", 21) == 0) return -2;
+            if (strncmp(resp, "OPPONENT_DISCONNECTED", 21) == 0 ||
+                strncmp(resp, "ERR_GAME_CANCELLED", 18) == 0) {
+                safe_str_copy(g_last_server_event, resp, sizeof(g_last_server_event));
+                return -2;
+            }
         }
 
         /* Attende conferma di completamento placement dal server */
         char resp[BUFFER_SIZE];
         if (read_server_line(sock, resp, sizeof(resp)) < 0) return -1;
-        if (strncmp(resp, "OPPONENT_DISCONNECTED", 21) == 0) return -2;
+        if (strncmp(resp, "OPPONENT_DISCONNECTED", 21) == 0 ||
+            strncmp(resp, "ERR_GAME_CANCELLED", 18) == 0) {
+            safe_str_copy(g_last_server_event, resp, sizeof(g_last_server_event));
+            return -2;
+        }
         return 0;
     }
 
@@ -382,7 +399,11 @@ static int do_ship_placement(int sock, Board *my_board) {
 
             char resp[BUFFER_SIZE];
             if (read_server_line(sock, resp, sizeof(resp)) < 0) return -1;
-            if (strncmp(resp, "OPPONENT_DISCONNECTED", 21) == 0) return -2;
+            if (strncmp(resp, "OPPONENT_DISCONNECTED", 21) == 0 ||
+                strncmp(resp, "ERR_GAME_CANCELLED", 18) == 0) {
+                safe_str_copy(g_last_server_event, resp, sizeof(g_last_server_event));
+                return -2;
+            }
 
             if (strncmp(resp, "SHIP_PLACED", 11) == 0) {
                 board_place_ship(my_board, i, r, c, dir);
@@ -396,7 +417,11 @@ static int do_ship_placement(int sock, Board *my_board) {
 
     char resp[BUFFER_SIZE];
     if (read_server_line(sock, resp, sizeof(resp)) < 0) return -1;
-    if (strncmp(resp, "OPPONENT_DISCONNECTED", 21) == 0) return -2;
+    if (strncmp(resp, "OPPONENT_DISCONNECTED", 21) == 0 ||
+        strncmp(resp, "ERR_GAME_CANCELLED", 18) == 0) {
+        safe_str_copy(g_last_server_event, resp, sizeof(g_last_server_event));
+        return -2;
+    }
     ui_print_single_board(my_board, "FLOTTA PRONTA");
     return 0;
 }
@@ -416,6 +441,20 @@ static int handle_opponent_disconnected(int sock) {
     char resp[BUFFER_SIZE];
     if (read_server_line(sock, resp, sizeof(resp)) < 0) return -1;
     printf("\n%s\n", resp);
+
+    if (choice == 1) {
+        printf("\n\033[1;32mPartita conclusa per abbandono dell'avversario. Vittoria assegnata a te!\033[0m\n");
+        printf("\033[1;33m[i] Nessuna rivincita possibile in quanto l'avversario si è disconnesso.\033[0m\n");
+        printf("Premi Invio per tornare alla lobby principale...");
+        char dummy[16];
+        safe_read_line(dummy, sizeof(dummy));
+    } else if (choice == 2) {
+        printf("\n\033[1;32m[i] Hai scelto di attendere un nuovo sfidante nella stanza.\033[0m\n");
+        printf("Premi Invio per continuare ad attendere...");
+        char dummy[16];
+        safe_read_line(dummy, sizeof(dummy));
+    }
+
     return choice;
 }
 
@@ -441,16 +480,8 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
                 int c_ret = get_valid_coords_multiplex(sock, "Dichiara coordinate bersaglio di fuoco (es. B4): ", &r, &c);
                 if (c_ret == -2) {
                     int res = handle_opponent_disconnected(sock);
-                    if (res == 1) {
-                        printf("\n\033[1;32mPartita conclusa per abbandono dell'avversario. Vittoria assegnata a te!\033[0m\n");
-                        printf("\033[1;33m[i] Nessuna rivincita possibile in quanto l'avversario si è disconnesso.\033[0m\n");
-                        printf("Premi Invio per tornare alla lobby principale...");
-                        char dummy[16];
-                        safe_read_line(dummy, sizeof(dummy));
-                        return OUTCOME_FORFEIT_WIN; /* Vittoria a tavolino: no rematch */
-                    } else if (res == 2) {
-                        return OUTCOME_WAIT_NEW_CHALLENGER; /* Attesa nuovo giocatore */
-                    }
+                    if (res == 1) return OUTCOME_FORFEIT_WIN;
+                    if (res == 2) return OUTCOME_WAIT_NEW_CHALLENGER;
                     return OUTCOME_ERROR;
                 }
                 if (c_ret < 0) {
@@ -470,16 +501,8 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
 
             if (strncmp(line, "OPPONENT_DISCONNECTED", 21) == 0) {
                 int res = handle_opponent_disconnected(sock);
-                if (res == 1) {
-                    printf("\n\033[1;32mPartita conclusa per abbandono dell'avversario. Vittoria assegnata a te!\033[0m\n");
-                    printf("\033[1;33m[i] Nessuna rivincita possibile in quanto l'avversario si è disconnesso.\033[0m\n");
-                    printf("Premi Invio per tornare alla lobby principale...");
-                    char dummy[16];
-                    safe_read_line(dummy, sizeof(dummy));
-                    return OUTCOME_FORFEIT_WIN;
-                } else if (res == 2) {
-                    return OUTCOME_WAIT_NEW_CHALLENGER;
-                }
+                if (res == 1) return OUTCOME_FORFEIT_WIN;
+                if (res == 2) return OUTCOME_WAIT_NEW_CHALLENGER;
                 return OUTCOME_ERROR;
             }
 
@@ -507,16 +530,8 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
 
             if (strncmp(line, "OPPONENT_DISCONNECTED", 21) == 0) {
                 int res = handle_opponent_disconnected(sock);
-                if (res == 1) {
-                    printf("\n\033[1;32mPartita conclusa per abbandono dell'avversario. Vittoria assegnata a te!\033[0m\n");
-                    printf("\033[1;33m[i] Nessuna rivincita possibile in quanto l'avversario si è disconnesso.\033[0m\n");
-                    printf("Premi Invio per tornare alla lobby principale...");
-                    char dummy[16];
-                    safe_read_line(dummy, sizeof(dummy));
-                    return OUTCOME_FORFEIT_WIN; /* Vittoria a tavolino: no rematch */
-                } else if (res == 2) {
-                    return OUTCOME_WAIT_NEW_CHALLENGER; /* Attesa nuovo giocatore */
-                }
+                if (res == 1) return OUTCOME_FORFEIT_WIN;
+                if (res == 2) return OUTCOME_WAIT_NEW_CHALLENGER;
                 return OUTCOME_ERROR;
             }
 
@@ -538,16 +553,8 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
 
             if (strncmp(line, "OPPONENT_DISCONNECTED", 21) == 0) {
                 int res = handle_opponent_disconnected(sock);
-                if (res == 1) {
-                    printf("\n\033[1;32mPartita conclusa per abbandono dell'avversario. Vittoria assegnata a te!\033[0m\n");
-                    printf("\033[1;33m[i] Nessuna rivincita possibile in quanto l'avversario si è disconnesso.\033[0m\n");
-                    printf("Premi Invio per tornare alla lobby principale...");
-                    char dummy[16];
-                    safe_read_line(dummy, sizeof(dummy));
-                    return OUTCOME_FORFEIT_WIN; /* Vittoria a tavolino: no rematch */
-                } else if (res == 2) {
-                    return OUTCOME_WAIT_NEW_CHALLENGER; /* Attesa nuovo giocatore */
-                }
+                if (res == 1) return OUTCOME_FORFEIT_WIN;
+                if (res == 2) return OUTCOME_WAIT_NEW_CHALLENGER;
                 return OUTCOME_ERROR;
             }
 
@@ -577,16 +584,8 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
 
             if (strncmp(line, "OPPONENT_DISCONNECTED", 21) == 0) {
                 int res = handle_opponent_disconnected(sock);
-                if (res == 1) {
-                    printf("\n\033[1;32mPartita conclusa per abbandono dell'avversario. Vittoria assegnata a te!\033[0m\n");
-                    printf("\033[1;33m[i] Nessuna rivincita possibile in quanto l'avversario si è disconnesso.\033[0m\n");
-                    printf("Premi Invio per tornare alla lobby principale...");
-                    char dummy[16];
-                    safe_read_line(dummy, sizeof(dummy));
-                    return OUTCOME_FORFEIT_WIN;
-                } else if (res == 2) {
-                    return OUTCOME_WAIT_NEW_CHALLENGER;
-                }
+                if (res == 1) return OUTCOME_FORFEIT_WIN;
+                if (res == 2) return OUTCOME_WAIT_NEW_CHALLENGER;
                 return OUTCOME_ERROR;
             }
 
@@ -652,9 +651,15 @@ static bool ask_rematch(int sock, const char *opponent_nick) {
             } else if (strncmp(line, "REMATCH_RESULT DECLINED", 23) == 0) {
                 printf("\n\033[1;33m[!] %s ha rifiutato la rivincita / abbandonato la stanza. Ritorno alla lobby.\033[0m\n",
                        opponent_nick ? opponent_nick : "L'avversario");
+                printf("Premi Invio per tornare alla lobby principale...");
+                char dummy[16];
+                safe_read_line(dummy, sizeof(dummy));
                 return false;
             } else if (strncmp(line, "OPPONENT_DISCONNECTED", 21) == 0) {
                 printf("\n\033[1;31m[!] L'avversario si è disconnesso dal server. Ritorno alla lobby.\033[0m\n");
+                printf("Premi Invio per tornare alla lobby principale...");
+                char dummy[16];
+                safe_read_line(dummy, sizeof(dummy));
                 return false;
             } else if (strncmp(line, "OK", 2) == 0) {
                 /* Acknowledge dal server, continuiamo ad attendere l'avversario */
@@ -696,45 +701,49 @@ static bool ask_rematch(int sock, const char *opponent_nick) {
 }
 
 /* Sessione completa di gioco: piazzamento -> combattimento -> rivincita */
-static void run_game_session(int sock, const char *opponent_nick, bool start_my_turn) {
+static int run_game_session(int sock, const char *opponent_nick, bool start_my_turn, bool is_host) {
     while (g_client_running) {
+        g_last_server_event[0] = '\0';
         Board my_board;
         int p_res = do_ship_placement(sock, &my_board);
         if (p_res == -2) {
-            int res = handle_opponent_disconnected(sock);
-            if (res == 1) {
-                printf("\n\033[1;32mPartita conclusa per abbandono dell'avversario. Vittoria assegnata a te!\033[0m\n");
-                printf("\033[1;33m[i] Nessuna rivincita possibile in quanto l'avversario si è disconnesso.\033[0m\n");
+            if (is_host) {
+                printf("\n\033[1;33m[!] Lo sfidante '%s' si è disconnesso prima dell'inizio del combattimento.\033[0m\n", opponent_nick);
+                printf("\033[1;32m[i] La tua stanza è di nuovo aperta e in ascolto per nuove richieste!\033[0m\n");
+                printf("Premi Invio per continuare ad attendere nella stanza...");
+                char dummy[16];
+                safe_read_line(dummy, sizeof(dummy));
+                return SESSION_WAIT_NEW_CHALLENGER;
+            } else {
+                printf("\n\033[1;31m[!] L'host '%s' si è disconnesso prima dell'inizio del combattimento.\033[0m\n", opponent_nick);
                 printf("Premi Invio per tornare alla lobby principale...");
                 char dummy[16];
                 safe_read_line(dummy, sizeof(dummy));
-                return;
-            } else if (res == 2) {
-                host_wait_for_challenger(sock);
-                return;
+                return SESSION_LOBBY;
             }
-            return;
         }
-        if (p_res < 0) return;
+        if (p_res < 0) return SESSION_ERROR;
 
         printf("\nIn attesa che l'avversario completi il posizionamento delle sue navi...\n");
         char line[BUFFER_SIZE];
-        if (read_server_line(sock, line, sizeof(line)) < 0) return;
+        if (read_server_line(sock, line, sizeof(line)) < 0) return SESSION_ERROR;
 
-        if (strncmp(line, "OPPONENT_DISCONNECTED", 21) == 0) {
-            int res = handle_opponent_disconnected(sock);
-            if (res == 1) {
-                printf("\n\033[1;32mPartita conclusa per abbandono dell'avversario. Vittoria assegnata a te!\033[0m\n");
-                printf("\033[1;33m[i] Nessuna rivincita possibile in quanto l'avversario si è disconnesso.\033[0m\n");
+        if (strncmp(line, "OPPONENT_DISCONNECTED", 21) == 0 ||
+            strncmp(line, "ERR_GAME_CANCELLED", 18) == 0) {
+            if (is_host) {
+                printf("\n\033[1;33m[!] Lo sfidante '%s' si è disconnesso prima dell'inizio del combattimento.\033[0m\n", opponent_nick);
+                printf("\033[1;32m[i] La tua stanza è di nuovo aperta e in ascolto per nuove richieste!\033[0m\n");
+                printf("Premi Invio per continuare ad attendere nella stanza...");
+                char dummy[16];
+                safe_read_line(dummy, sizeof(dummy));
+                return SESSION_WAIT_NEW_CHALLENGER;
+            } else {
+                printf("\n\033[1;31m[!] L'host '%s' si è disconnesso prima dell'inizio del combattimento.\033[0m\n", opponent_nick);
                 printf("Premi Invio per tornare alla lobby principale...");
                 char dummy[16];
                 safe_read_line(dummy, sizeof(dummy));
-                return;
-            } else if (res == 2) {
-                host_wait_for_challenger(sock);
-                return;
+                return SESSION_LOBBY;
             }
-            return;
         }
 
         int turn_flag = 0;
@@ -746,34 +755,40 @@ static void run_game_session(int sock, const char *opponent_nick, bool start_my_
         int outcome = run_combat_loop(sock, &my_board, opponent_nick, start_my_turn);
 
         if (outcome == OUTCOME_FORFEIT_WIN) {
-            /* Vittoria a tavolino per abbandono dell'avversario: nessuna rivincita possibile */
-            return;
+            /* Vittoria a tavolino per abbandono dell'avversario durante il combattimento */
+            return SESSION_LOBBY;
         } else if (outcome == OUTCOME_WAIT_NEW_CHALLENGER) {
             /* Giocatore superstite ha scelto di attendere un nuovo sfidante nella stanza */
-            host_wait_for_challenger(sock);
-            return;
+            return SESSION_WAIT_NEW_CHALLENGER;
         } else if (outcome <= 0) {
-            return;
+            return SESSION_ERROR;
         }
 
         /* Offerta rivincita: sia per vittoria normale che per sconfitta sul campo */
         if (!ask_rematch(sock, opponent_nick)) {
-            break;
+            return SESSION_LOBBY;
         }
     }
+    return SESSION_LOBBY;
 }
 
 /* Attesa sfidante per l'host con multiplazione I/O tramite select() */
 static void host_wait_for_challenger(int sock) {
-    ui_print_header("STANZA CREATA - IN ATTESA DI UNO SFIDANTE");
-    printf("Gli altri giocatori possono ora vedere la tua partita e richiedere di unirsi.\n");
-    printf("Comandi disponibili:\n");
-    printf("  Digita '0' o 'cancel' per annullare la stanza e tornare al menu.\n\n");
-
+    bool need_header = true;
     fd_set readfds;
     char line[BUFFER_SIZE];
 
     while (g_client_running) {
+        if (need_header) {
+            ui_clear_screen();
+            ui_print_header("STANZA CREATA - IN ATTESA DI UNO SFIDANTE");
+            printf("Gli altri giocatori possono ora vedere la tua partita e richiedere di unirsi.\n");
+            printf("Comandi disponibili:\n");
+            printf("  Digita '0' o 'cancel' per annullare la stanza e tornare al menu.\n\n");
+            fflush(stdout);
+            need_header = false;
+        }
+
         FD_ZERO(&readfds);
         FD_SET(STDIN_FILENO, &readfds);
         FD_SET(sock, &readfds);
@@ -781,6 +796,7 @@ static void host_wait_for_challenger(int sock) {
 
         int ret = select(maxfd + 1, &readfds, NULL, NULL, NULL);
         if (ret < 0) {
+            if (errno == EINTR) continue;
             break;
         }
 
@@ -813,6 +829,11 @@ static void host_wait_for_challenger(int sock) {
                 int d_ret = get_valid_int_multiplex(sock, "Scelta (1 o 0): ", 0, 1, &decision);
                 if (d_ret == -2) {
                     printf("\n\033[1;33m[!] Lo sfidante si è disconnesso prima della risposta.\033[0m\n");
+                    printf("\033[1;32m[i] La tua stanza è di nuovo aperta e in ascolto per nuove richieste!\033[0m\n");
+                    printf("Premi Invio per continuare ad attendere nella stanza...");
+                    char dummy[16];
+                    safe_read_line(dummy, sizeof(dummy));
+                    need_header = true;
                     continue;
                 }
                 if (d_ret < 0) return;
@@ -823,18 +844,30 @@ static void host_wait_for_challenger(int sock) {
                     if (read_server_line(sock, line, sizeof(line)) < 0) return;
                     if (strncmp(line, "JOIN_ACCEPTED", 13) != 0) {
                         printf("\n\033[1;31m[!] Impossibile avviare la partita: %s\033[0m\n", line);
+                        printf("\033[1;32m[i] La tua stanza è di nuovo aperta e in ascolto per nuove richieste!\033[0m\n");
+                        printf("Premi Invio per continuare ad attendere nella stanza...");
+                        char dummy[16];
+                        safe_read_line(dummy, sizeof(dummy));
+                        need_header = true;
                         continue;
                     }
                     /* Leggi START_PLACEMENT */
                     if (read_server_line(sock, line, sizeof(line)) < 0) return;
-                    run_game_session(sock, challenger_nick, true);
+
+                    int session_res = run_game_session(sock, challenger_nick, true, true);
+                    if (session_res == SESSION_WAIT_NEW_CHALLENGER) {
+                        need_header = true;
+                        continue;
+                    }
                     return;
                 } else {
                     read_server_line(sock, line, sizeof(line));
                     printf("\nRichiesta rifiutata. Sei ancora in attesa di altri sfidanti...\n");
+                    need_header = true;
                 }
             } else if (strncmp(line, "INFO", 4) == 0) {
                 printf("\n%s\n", line);
+                need_header = true;
             }
         }
     }
@@ -923,7 +956,10 @@ static void list_and_join_game(int sock) {
 
         /* Leggi START_PLACEMENT */
         if (read_server_line(sock, line, sizeof(line)) < 0) return;
-        run_game_session(sock, host_nick, false);
+        int session_res = run_game_session(sock, host_nick, false, false);
+        if (session_res == SESSION_WAIT_NEW_CHALLENGER) {
+            host_wait_for_challenger(sock);
+        }
     } else if (strncmp(line, "JOIN_REJECTED", 13) == 0) {
         printf("\n\033[1;31m[!] La tua richiesta di sfida è stata RIFIUTATA dall'host.\033[0m\n");
         printf("Premi Invio per tornare al menu...");

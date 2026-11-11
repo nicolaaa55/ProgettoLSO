@@ -335,6 +335,9 @@ static void process_client_command(ClientSession *client, const char *line) {
 
             pthread_mutex_lock(&g->lock);
             g->in_use = false;
+            g->host = NULL;
+            g->guest = NULL;
+            g->pending_challenger = NULL;
             pthread_mutex_unlock(&g->lock);
         } else {
             /* Vuole la rivincita */
@@ -408,10 +411,14 @@ static void process_client_command(ClientSession *client, const char *line) {
                 g->host_placement_done = false;
                 g->guest_placement_done = false;
                 g->game_over = false;
+                g->winner = 0;
+                g->current_turn = 1;
+                g->host_rematch = -1;
+                g->guest_rematch = -1;
                 pthread_mutex_unlock(&g->lock);
             }
             client->state = STATE_WAITING_OPPONENT;
-            client_send(client, "OK Sei tornato in attesa di un nuovo giocatore nella lobby.");
+            client_send(client, "OK Sei tornato in attesa di un nuovo giocatore nella stanza.");
         }
         return;
     }
