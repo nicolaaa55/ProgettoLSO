@@ -9,12 +9,9 @@ SRC_CLIENT = src/client/client.c src/client/ui.c $(SRC_COMMON)
 SERVER_BIN = server
 CLIENT_BIN = client
 
-.PHONY: all debug clean run-server run-client pdf
+.PHONY: all debug clean run-server run-client
 
 all: $(SERVER_BIN) $(CLIENT_BIN)
-
-pdf:
-	python3 doc/genera_pdf.py
 
 $(SERVER_BIN): $(SRC_SERVER)
 	$(CC) $(CFLAGS) -o $@ $(SRC_SERVER)

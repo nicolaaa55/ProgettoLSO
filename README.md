@@ -53,7 +53,7 @@ ProgettoLSO/
 ├── Makefile                # Script di build (make, make debug, make clean)
 ├── README.md               # Istruzioni d'uso e panoramica del progetto
 ├── doc/
-│   └── documentazione.md   # Relazione tecnica dettagliata sulle scelte implementative
+│   └── DOCUMENTAZIONE.pdf  # Relazione tecnica sulle scelte implementative (max 10 pagine)
 ├── include/
 │   ├── protocol.h          # Costanti, codici messaggio e definizioni condivise
 │   ├── network.h           # Wrapper di rete robusti (send_all, recv_line, socket setup)
