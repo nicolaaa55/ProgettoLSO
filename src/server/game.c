@@ -104,11 +104,19 @@ bool game_auto_place(Game *g, ClientSession *player) {
     return true;
 }
 
-bool game_handle_shot(Game *g, ClientSession *shooter, int row, int col, ShotResult *out_res, int *out_ship_idx, bool *out_game_over, const char **err_msg) {
+bool game_handle_shot(Game *g, ClientSession *shooter, int row, int col,
+                      ShotResult *out_res, int *out_ship_idx,
+                      int *out_sunk_row, int *out_sunk_col, int *out_sunk_len, ShipDirection *out_sunk_dir,
+                      bool *out_game_over, const char **err_msg) {
     if (!g || !shooter || !out_res || !out_game_over) {
         if (err_msg) *err_msg = "Parametri non validi.";
         return false;
     }
+
+    if (out_sunk_row) *out_sunk_row = -1;
+    if (out_sunk_col) *out_sunk_col = -1;
+    if (out_sunk_len) *out_sunk_len = 0;
+    if (out_sunk_dir) *out_sunk_dir = DIR_HORIZONTAL;
 
     pthread_mutex_lock(&g->lock);
 
@@ -145,6 +153,13 @@ bool game_handle_shot(Game *g, ClientSession *shooter, int row, int col, ShotRes
 
     *out_res = res;
     if (out_ship_idx) *out_ship_idx = hit_ship;
+
+    if (res == SHOT_SUNK && hit_ship >= 0 && hit_ship < NUM_SHIPS) {
+        if (out_sunk_row) *out_sunk_row = target_board->ships[hit_ship].row;
+        if (out_sunk_col) *out_sunk_col = target_board->ships[hit_ship].col;
+        if (out_sunk_len) *out_sunk_len = target_board->ships[hit_ship].size;
+        if (out_sunk_dir) *out_sunk_dir = target_board->ships[hit_ship].dir;
+    }
 
     if (board_all_sunk(target_board)) {
         g->game_over = true;

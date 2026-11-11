@@ -172,7 +172,7 @@ La logica del gioco navale è incapsulata nel modulo `board.c`:
   4. Sottomarino (3 caselle)
   5. Cacciatorpediniere (2 caselle)
 - **Validazione del Posizionamento:** la funzione `board_can_place_ship()` verifica che le coordinate siano interne alla griglia `[0..9]`, che la nave non superi i bordi e che non vi siano sovrapposizioni con navi già presenti. Il sistema supporta l'estensione della nave in tutte e quattro le direzioni cardinali a partire dalla coordinata indicata: verso **Destra** o **Sinistra** per l'orientamento orizzontale, e verso il **Basso** o l'**Alto** per quello verticale. Se entrambe le direzioni sono fisicamente ammissibili dalla cella selezionata, il client offre all'utente la scelta; se solo una direzione è praticabile, essa viene applicata automaticamente.
-- **Risoluzione dei Colpi:** la funzione `board_receive_shot()` determina l'esito (*Acqua*, *Colpito*, *Affondato*). Quando tutte le celle di una nave sono state colpite, la nave viene marcata come affondata (`CELL_SUNK`) e viene decrementato il contatore delle navi vive. Il raggiungimento di `ships_alive == 0` decreta la vittoria.
+- **Risoluzione dei Colpi:** la funzione `board_receive_shot()` determina l'esito (*Acqua*, *Colpito*, *Affondato*). Quando tutte le celle di una nave sono state colpite, la nave viene marcata come affondata (`CELL_SUNK`) e viene decrementato il contatore delle navi vive. Tutte le celle appartenenti all'unità affondata vengono contestualmente convertite nello stato `CELL_SUNK` su entrambi i client (radar di tiro e flotta alleata), garantendo un riscontro visivo chiaro ed evitando qualsiasi ambiguità con colpi isolati su altre imbarcazioni. Il raggiungimento di `ships_alive == 0` decreta la vittoria.
 
 ---
 

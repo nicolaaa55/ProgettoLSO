@@ -37,6 +37,9 @@ void game_reset(Game *g);
 /* Risoluzione azioni di gioco */
 bool game_place_ship(Game *g, struct ClientSession *player, int ship_idx, int row, int col, ShipDirection dir, const char **err_msg);
 bool game_auto_place(Game *g, struct ClientSession *player);
-bool game_handle_shot(Game *g, struct ClientSession *shooter, int row, int col, ShotResult *out_res, int *out_ship_idx, bool *out_game_over, const char **err_msg);
+bool game_handle_shot(Game *g, struct ClientSession *shooter, int row, int col,
+                      ShotResult *out_res, int *out_ship_idx,
+                      int *out_sunk_row, int *out_sunk_col, int *out_sunk_len, ShipDirection *out_sunk_dir,
+                      bool *out_game_over, const char **err_msg);
 
 #endif /* GAME_H */

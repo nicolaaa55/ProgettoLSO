@@ -276,7 +276,11 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
 
             char shooter[32], outcome[32], ship_name[32];
             int shot_r = -1, shot_c = -1, next_turn = 0;
-            if (sscanf(line, "SHOT_RESULT %31s %d %d %31s %31s %d", shooter, &shot_r, &shot_c, outcome, ship_name, &next_turn) >= 4) {
+            int sunk_r = -1, sunk_c = -1, sunk_len = 0, sunk_dir = 0;
+            int parsed = sscanf(line, "SHOT_RESULT %31s %d %d %31s %31s %d %d %d %d %d",
+                                shooter, &shot_r, &shot_c, outcome, ship_name, &next_turn,
+                                &sunk_r, &sunk_c, &sunk_len, &sunk_dir);
+            if (parsed >= 4) {
                 if (strcmp(outcome, "MISS") == 0) {
                     opp_radar[shot_r][shot_c] = CELL_MISS;
                     printf("\n\033[0;37m>>> ACQUA! Colpo a vuoto in %c%d <<<\033[0m\n", 'A' + shot_r, shot_c + 1);
@@ -284,7 +288,17 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
                     opp_radar[shot_r][shot_c] = CELL_HIT;
                     printf("\n\033[1;31m>>> COLPITO! Nave nemica centrata in %c%d! <<<\033[0m\n", 'A' + shot_r, shot_c + 1);
                 } else if (strcmp(outcome, "SUNK") == 0) {
-                    opp_radar[shot_r][shot_c] = CELL_SUNK;
+                    if (parsed >= 10 && sunk_len > 0) {
+                        for (int i = 0; i < sunk_len; i++) {
+                            int r = (sunk_dir == DIR_VERTICAL) ? (sunk_r + i) : sunk_r;
+                            int c = (sunk_dir == DIR_HORIZONTAL) ? (sunk_c + i) : sunk_c;
+                            if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
+                                opp_radar[r][c] = CELL_SUNK;
+                            }
+                        }
+                    } else {
+                        opp_radar[shot_r][shot_c] = CELL_SUNK;
+                    }
                     printf("\n\033[1;41;37m>>> COLPITO E AFFONDATO! Hai affondato: %s! <<<\033[0m\n", ship_name);
                 }
             }
@@ -340,7 +354,11 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
 
             char shooter[32], outcome[32], ship_name[32];
             int shot_r = -1, shot_c = -1, next_turn = 0;
-            if (sscanf(line, "SHOT_RESULT %31s %d %d %31s %31s %d", shooter, &shot_r, &shot_c, outcome, ship_name, &next_turn) >= 4) {
+            int sunk_r = -1, sunk_c = -1, sunk_len = 0, sunk_dir = 0;
+            int parsed = sscanf(line, "SHOT_RESULT %31s %d %d %31s %31s %d %d %d %d %d",
+                                shooter, &shot_r, &shot_c, outcome, ship_name, &next_turn,
+                                &sunk_r, &sunk_c, &sunk_len, &sunk_dir);
+            if (parsed >= 4) {
                 if (strcmp(outcome, "MISS") == 0) {
                     if (my_board->grid[shot_r][shot_c] == CELL_EMPTY) {
                         my_board->grid[shot_r][shot_c] = CELL_MISS;
@@ -350,7 +368,32 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
                     my_board->grid[shot_r][shot_c] = CELL_HIT;
                     printf("\n\033[1;31m>>> ALLARME! %s ha COLPITO una tua nave in %c%d! <<<\033[0m\n", opponent_nick, 'A' + shot_r, shot_c + 1);
                 } else if (strcmp(outcome, "SUNK") == 0) {
-                    my_board->grid[shot_r][shot_c] = CELL_SUNK;
+                    if (parsed >= 10 && sunk_len > 0) {
+                        for (int i = 0; i < sunk_len; i++) {
+                            int r = (sunk_dir == DIR_VERTICAL) ? (sunk_r + i) : sunk_r;
+                            int c = (sunk_dir == DIR_HORIZONTAL) ? (sunk_c + i) : sunk_c;
+                            if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
+                                my_board->grid[r][c] = CELL_SUNK;
+                            }
+                        }
+                    } else {
+                        int ship_idx = my_board->ship_map[shot_r][shot_c];
+                        if (ship_idx >= 0 && ship_idx < NUM_SHIPS) {
+                            int sr = my_board->ships[ship_idx].row;
+                            int sc = my_board->ships[ship_idx].col;
+                            int slen = my_board->ships[ship_idx].size;
+                            ShipDirection sdir = my_board->ships[ship_idx].dir;
+                            for (int i = 0; i < slen; i++) {
+                                int r = (sdir == DIR_VERTICAL) ? (sr + i) : sr;
+                                int c = (sdir == DIR_HORIZONTAL) ? (sc + i) : sc;
+                                if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
+                                    my_board->grid[r][c] = CELL_SUNK;
+                                }
+                            }
+                        } else {
+                            my_board->grid[shot_r][shot_c] = CELL_SUNK;
+                        }
+                    }
                     printf("\n\033[1;41;37m>>> AFFONDATA! La tua nave '%s' è stata affondata da %s! <<<\033[0m\n", ship_name, opponent_nick);
                 }
             }

@@ -234,10 +234,14 @@ static void process_client_command(ClientSession *client, const char *line) {
 
         ShotResult res = SHOT_INVALID;
         int hit_ship_idx = -1;
+        int sunk_r = -1, sunk_c = -1, sunk_len = 0;
+        ShipDirection sunk_dir = DIR_HORIZONTAL;
         bool is_game_over = false;
         const char *err = NULL;
 
-        if (!game_handle_shot(g, client, row, col, &res, &hit_ship_idx, &is_game_over, &err)) {
+        if (!game_handle_shot(g, client, row, col, &res, &hit_ship_idx,
+                              &sunk_r, &sunk_c, &sunk_len, &sunk_dir,
+                              &is_game_over, &err)) {
             client_send(client, "ERR_FIRE %s", err ? err : "Colpo non valido.");
             return;
         }
@@ -250,24 +254,44 @@ static void process_client_command(ClientSession *client, const char *line) {
         if (is_game_over) {
             /* Partita finita: vittoria per lo sparatore, sconfitta per l'avversario */
             client->state = STATE_GAME_OVER;
-            client_send(client, "SHOT_RESULT YOU %d %d %s %s 0", row, col, res_str, ship_name);
+            if (res == SHOT_SUNK) {
+                client_send(client, "SHOT_RESULT YOU %d %d SUNK %s 0 %d %d %d %d",
+                            row, col, ship_name, sunk_r, sunk_c, sunk_len, (int)sunk_dir);
+            } else {
+                client_send(client, "SHOT_RESULT YOU %d %d %s %s 0", row, col, res_str, ship_name);
+            }
             client_send(client, "GAME_OVER WIN Vittoria! Hai distrutto tutte le navi nemiche!");
 
             if (opponent && opponent->active) {
                 opponent->state = STATE_GAME_OVER;
-                client_send(opponent, "SHOT_RESULT OPPONENT %d %d %s %s 0", row, col, res_str, ship_name);
+                if (res == SHOT_SUNK) {
+                    client_send(opponent, "SHOT_RESULT OPPONENT %d %d SUNK %s 0 %d %d %d %d",
+                                row, col, ship_name, sunk_r, sunk_c, sunk_len, (int)sunk_dir);
+                } else {
+                    client_send(opponent, "SHOT_RESULT OPPONENT %d %d %s %s 0", row, col, res_str, ship_name);
+                }
                 client_send(opponent, "GAME_OVER LOSE Tutte le tue navi sono state affondate. Hai perso!");
             }
             log_info("Partita %d vinta da %s contro %s", g->id, client->nickname, opponent ? opponent->nickname : "?");
         } else {
             /* Turno completato: passaggio all'avversario */
             client->state = STATE_IN_GAME_WAIT_TURN;
-            client_send(client, "SHOT_RESULT YOU %d %d %s %s 0", row, col, res_str, ship_name);
+            if (res == SHOT_SUNK) {
+                client_send(client, "SHOT_RESULT YOU %d %d SUNK %s 0 %d %d %d %d",
+                            row, col, ship_name, sunk_r, sunk_c, sunk_len, (int)sunk_dir);
+            } else {
+                client_send(client, "SHOT_RESULT YOU %d %d %s %s 0", row, col, res_str, ship_name);
+            }
             client_send(client, "WAIT_TURN Turno passato all'avversario.");
 
             if (opponent && opponent->active) {
                 opponent->state = STATE_IN_GAME_MY_TURN;
-                client_send(opponent, "SHOT_RESULT OPPONENT %d %d %s %s 1", row, col, res_str, ship_name);
+                if (res == SHOT_SUNK) {
+                    client_send(opponent, "SHOT_RESULT OPPONENT %d %d SUNK %s 1 %d %d %d %d",
+                                row, col, ship_name, sunk_r, sunk_c, sunk_len, (int)sunk_dir);
+                } else {
+                    client_send(opponent, "SHOT_RESULT OPPONENT %d %d %s %s 1", row, col, res_str, ship_name);
+                }
                 client_send(opponent, "YOUR_TURN Tocca a te dichiarare le coordinate del colpo!");
             }
         }
