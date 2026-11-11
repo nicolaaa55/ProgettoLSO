@@ -4,7 +4,7 @@ DEBUG_FLAGS = -Wall -Wextra -Wpedantic -std=c11 -D_POSIX_C_SOURCE=200809L -Iincl
 
 SRC_COMMON = src/common/network.c src/common/board.c src/common/utils.c
 SRC_SERVER = src/server/server.c src/server/lobby.c src/server/game.c $(SRC_COMMON)
-SRC_CLIENT = src/client/client.c src/client/ui.c $(SRC_COMMON)
+SRC_CLIENT = src/client/client.c src/client/client_lobby.c src/client/client_game.c src/client/ui.c $(SRC_COMMON)
 
 SERVER_BIN = server
 CLIENT_BIN = client
