@@ -182,7 +182,7 @@ La logica del gioco navale è incapsulata nel modulo `board.c`:
 In accordo con la specifica opzionale della traccia (pagina 3):
 - Se un giocatore cade durante la partita, il server rileva la chiusura della socket e notifica l'avversario tramite il messaggio `OPPONENT_DISCONNECTED`.
 - Al giocatore superstite viene presentata una scelta:
-  1. **Terminare la partita con vittoria a tavolino:** la sessione viene conclusa con vittoria per forfait e il giocatore torna alla lobby.
+  1. **Terminare la partita con vittoria a tavolino:** la sessione viene conclusa con vittoria per forfait e il giocatore torna alla lobby principale; in questo scenario la richiesta di rivincita viene naturalmente inibita dal sistema, non essendo più presente l'avversario.
   2. **Attendere un nuovo giocatore nella stanza:** la stanza viene reimpostata in stato di attesa (`STATE_WAITING_OPPONENT`), consentendo a un altro utente della lobby di unirsi.
 
 ### 9.2 Meccanismo di Rivincita (Rematch)

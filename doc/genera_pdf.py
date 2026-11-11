@@ -434,7 +434,7 @@ def build_pdf(filename):
     story.append(Paragraph("1. Nel momento in cui un client interrompe la connessione (rilevata da <code>recv_line() <= 0</code> o errore di socket), il thread worker invoca <code>lobby_remove_client()</code>.", bullet_style))
     story.append(Paragraph("2. Se la partita era in corso, il giocatore rimasto riceve immediatamente la notifica speciale <code>OPPONENT_DISCONNECTED</code> e transita nello stato <code>STATE_OPPONENT_LEFT</code>.", bullet_style))
     story.append(Paragraph("3. Al giocatore superstite viene mostrato un menu decisionale interattivo:<br/>"
-        "  - <b>Opzione 1 (Vittoria a tavolino):</b> la partita viene chiusa, viene assegnata la vittoria formale per abbandono e l'utente torna alla lobby.<br/>"
+        "  - <b>Opzione 1 (Vittoria a tavolino):</b> la partita viene chiusa con vittoria per abbandono e l'utente torna alla lobby principale; in questo caso la richiesta di rivincita viene inibita, non essendovi più un avversario connesso.<br/>"
         "  - <b>Opzione 2 (Attesa nuovo giocatore):</b> la stanza viene resettata e rimessa nello stato di attesa (<code>STATE_WAITING_OPPONENT</code>), permettendo a un nuovo utente collegato di unirsi alla partita.",
         bullet_style
     ))

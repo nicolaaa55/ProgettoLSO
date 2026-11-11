@@ -30,6 +30,10 @@ static void sigint_handler(int sig) {
     exit(0);
 }
 
+/* Prototipi funzioni mutualmente richiamate */
+static void host_wait_for_challenger(int sock);
+static void run_game_session(int sock, const char *opponent_nick, bool start_my_turn);
+
 /* Attende e legge una linea dal server, gestendo eventuali disconnessioni */
 static int read_server_line(int sock, char *buf, size_t size) {
     int n = recv_line(sock, buf, size);
@@ -285,8 +289,23 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
                 }
             }
 
-            /* Controlla prossimo messaggio (GAME_OVER o WAIT_TURN) */
+            /* Controlla prossimo messaggio (GAME_OVER, OPPONENT_DISCONNECTED o WAIT_TURN) */
             if (read_server_line(sock, line, sizeof(line)) < 0) return -1;
+
+            if (strncmp(line, "OPPONENT_DISCONNECTED", 21) == 0) {
+                int res = handle_opponent_disconnected(sock);
+                if (res == 1) {
+                    printf("\n\033[1;32mPartita conclusa per abbandono dell'avversario. Vittoria assegnata a te!\033[0m\n");
+                    printf("\033[1;33m[i] Nessuna rivincita possibile in quanto l'avversario si è disconnesso.\033[0m\n");
+                    printf("Premi Invio per tornare alla lobby principale...");
+                    char dummy[16];
+                    safe_read_line(dummy, sizeof(dummy));
+                    return 2; /* Vittoria a tavolino: no rematch */
+                } else if (res == 2) {
+                    return 3; /* Attesa nuovo giocatore */
+                }
+                return 0;
+            }
 
             if (strncmp(line, "GAME_OVER", 9) == 0) {
                 ui_print_boards(my_board, opp_radar);
@@ -295,7 +314,7 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
                 printf("               VITTORIA! HAI VINTO LA PARTITA!              \n");
                 printf("************************************************************\n");
                 printf("\033[0m\n");
-                return 1; /* Vittoria */
+                return 1; /* Vittoria normale sul campo */
             } else if (strncmp(line, "WAIT_TURN", 9) == 0) {
                 my_turn = false;
             }
@@ -306,7 +325,17 @@ static int run_combat_loop(int sock, Board *my_board, const char *opponent_nick,
 
             if (strncmp(line, "OPPONENT_DISCONNECTED", 21) == 0) {
                 int res = handle_opponent_disconnected(sock);
-                return (res == 1) ? 1 : 0;
+                if (res == 1) {
+                    printf("\n\033[1;32mPartita conclusa per abbandono dell'avversario. Vittoria assegnata a te!\033[0m\n");
+                    printf("\033[1;33m[i] Nessuna rivincita possibile in quanto l'avversario si è disconnesso.\033[0m\n");
+                    printf("Premi Invio per tornare alla lobby principale...");
+                    char dummy[16];
+                    safe_read_line(dummy, sizeof(dummy));
+                    return 2; /* Vittoria a tavolino: no rematch */
+                } else if (res == 2) {
+                    return 3; /* Attesa nuovo giocatore */
+                }
+                return 0;
             }
 
             char shooter[32], outcome[32], ship_name[32];
@@ -392,15 +421,42 @@ static void run_game_session(int sock, const char *opponent_nick, bool start_my_
         char line[BUFFER_SIZE];
         if (read_server_line(sock, line, sizeof(line)) < 0) return;
 
+        if (strncmp(line, "OPPONENT_DISCONNECTED", 21) == 0) {
+            int res = handle_opponent_disconnected(sock);
+            if (res == 1) {
+                printf("\n\033[1;32mPartita conclusa per abbandono dell'avversario. Vittoria assegnata a te!\033[0m\n");
+                printf("\033[1;33m[i] Nessuna rivincita possibile in quanto l'avversario si è disconnesso.\033[0m\n");
+                printf("Premi Invio per tornare alla lobby principale...");
+                char dummy[16];
+                safe_read_line(dummy, sizeof(dummy));
+                return;
+            } else if (res == 2) {
+                host_wait_for_challenger(sock);
+                return;
+            }
+            return;
+        }
+
         int turn_flag = 0;
         char opp[32];
         if (sscanf(line, "COMBAT_START %d %31s", &turn_flag, opp) >= 1) {
             start_my_turn = (turn_flag == 1);
         }
 
-        run_combat_loop(sock, &my_board, opponent_nick, start_my_turn);
+        int outcome = run_combat_loop(sock, &my_board, opponent_nick, start_my_turn);
 
-        /* Offerta rivincita */
+        if (outcome == 2) {
+            /* Vittoria a tavolino per abbandono dell'avversario: nessuna rivincita possibile */
+            return;
+        } else if (outcome == 3) {
+            /* Giocatore superstite ha scelto di attendere un nuovo sfidante nella stanza */
+            host_wait_for_challenger(sock);
+            return;
+        } else if (outcome <= 0) {
+            return;
+        }
+
+        /* Offerta rivincita: SOLO se la partita si è conclusa regolarmente sul campo (outcome == 1) */
         if (!ask_rematch(sock)) {
             break;
         }
