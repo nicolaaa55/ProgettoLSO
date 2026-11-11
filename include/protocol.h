@@ -40,8 +40,12 @@ typedef enum {
 
 /* Orientamento nave */
 typedef enum {
-    DIR_HORIZONTAL = 0,
-    DIR_VERTICAL = 1
+    DIR_HORIZONTAL = 0, /* Orizzontale verso destra (default H o D) */
+    DIR_RIGHT = 0,
+    DIR_VERTICAL = 1,   /* Verticale verso il basso (default V o B) */
+    DIR_DOWN = 1,
+    DIR_LEFT = 2,       /* Orizzontale verso sinistra (S) */
+    DIR_UP = 3          /* Verticale verso l'alto (A) */
 } ShipDirection;
 
 /* Stato del client nel protocollo */

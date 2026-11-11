@@ -151,10 +151,21 @@ static void process_client_command(ClientSession *client, const char *line) {
         int ship_idx = -1, row = -1, col = -1;
         char dir_char = 0;
         if (sscanf(trimmed, "%*s %d %d %d %c", &ship_idx, &row, &col, &dir_char) != 4) {
-            client_send(client, "ERR_INVALID_ARGS Uso: PLACE_SHIP <indice_nave> <riga> <colonna> <H|V>");
+            client_send(client, "ERR_INVALID_ARGS Uso: PLACE_SHIP <indice_nave> <riga> <colonna> <H|V|D|S|B|A>");
             return;
         }
-        ShipDirection dir = (toupper((unsigned char)dir_char) == 'V') ? DIR_VERTICAL : DIR_HORIZONTAL;
+
+        char dc = (char)toupper((unsigned char)dir_char);
+        ShipDirection dir = DIR_HORIZONTAL;
+        if (dc == 'S' || dc == 'L') {
+            dir = DIR_LEFT;
+        } else if (dc == 'A' || dc == 'U') {
+            dir = DIR_UP;
+        } else if (dc == 'V' || dc == 'B') {
+            dir = DIR_DOWN;
+        } else {
+            dir = DIR_RIGHT; /* 'H', 'D', 'R' */
+        }
 
         Game *g = lobby_get_game(client->active_game_id);
         if (!g) {

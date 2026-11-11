@@ -50,9 +50,9 @@ bool board_can_place_ship(const Board *b, int ship_idx, int row, int col, ShipDi
 
     int size = b->ships[ship_idx].size;
 
-    if (dir == DIR_HORIZONTAL) {
+    if (dir == DIR_RIGHT || dir == DIR_HORIZONTAL) {
         if (col + size > BOARD_SIZE) {
-            if (err_msg) *err_msg = "La nave fuoriesce orizzontalmente dal bordo della griglia.";
+            if (err_msg) *err_msg = "La nave fuoriesce a destra dal bordo della griglia.";
             return false;
         }
         for (int c = col; c < col + size; c++) {
@@ -61,9 +61,20 @@ bool board_can_place_ship(const Board *b, int ship_idx, int row, int col, ShipDi
                 return false;
             }
         }
-    } else if (dir == DIR_VERTICAL) {
+    } else if (dir == DIR_LEFT) {
+        if (col - size + 1 < 0) {
+            if (err_msg) *err_msg = "La nave fuoriesce a sinistra dal bordo della griglia.";
+            return false;
+        }
+        for (int c = col; c > col - size; c--) {
+            if (b->grid[row][c] != CELL_EMPTY) {
+                if (err_msg) *err_msg = "Sovrapposizione con un'altra nave presente sulla griglia.";
+                return false;
+            }
+        }
+    } else if (dir == DIR_DOWN || dir == DIR_VERTICAL) {
         if (row + size > BOARD_SIZE) {
-            if (err_msg) *err_msg = "La nave fuoriesce verticalmente dal bordo della griglia.";
+            if (err_msg) *err_msg = "La nave fuoriesce in basso dal bordo della griglia.";
             return false;
         }
         for (int r = row; r < row + size; r++) {
@@ -72,8 +83,19 @@ bool board_can_place_ship(const Board *b, int ship_idx, int row, int col, ShipDi
                 return false;
             }
         }
+    } else if (dir == DIR_UP) {
+        if (row - size + 1 < 0) {
+            if (err_msg) *err_msg = "La nave fuoriesce in alto dal bordo della griglia.";
+            return false;
+        }
+        for (int r = row; r > row - size; r--) {
+            if (b->grid[r][col] != CELL_EMPTY) {
+                if (err_msg) *err_msg = "Sovrapposizione con un'altra nave presente sulla griglia.";
+                return false;
+            }
+        }
     } else {
-        if (err_msg) *err_msg = "Orientamento non valido. Usa Orizzontale (H) o Verticale (V).";
+        if (err_msg) *err_msg = "Orientamento non valido.";
         return false;
     }
 
@@ -87,24 +109,51 @@ bool board_place_ship(Board *b, int ship_idx, int row, int col, ShipDirection di
     }
 
     int size = b->ships[ship_idx].size;
-    b->ships[ship_idx].row = row;
-    b->ships[ship_idx].col = col;
-    b->ships[ship_idx].dir = dir;
-    b->ships[ship_idx].placed = true;
+    int start_row = row;
+    int start_col = col;
+    ShipDirection norm_dir = DIR_HORIZONTAL;
 
-    if (dir == DIR_HORIZONTAL) {
+    if (dir == DIR_RIGHT || dir == DIR_HORIZONTAL) {
+        start_row = row;
+        start_col = col;
+        norm_dir = DIR_HORIZONTAL;
         for (int c = col; c < col + size; c++) {
             b->grid[row][c] = CELL_SHIP;
             b->ship_map[row][c] = ship_idx;
         }
-    } else {
+    } else if (dir == DIR_LEFT) {
+        start_row = row;
+        start_col = col - size + 1;
+        norm_dir = DIR_HORIZONTAL;
+        for (int c = col; c > col - size; c--) {
+            b->grid[row][c] = CELL_SHIP;
+            b->ship_map[row][c] = ship_idx;
+        }
+    } else if (dir == DIR_DOWN || dir == DIR_VERTICAL) {
+        start_row = row;
+        start_col = col;
+        norm_dir = DIR_VERTICAL;
         for (int r = row; r < row + size; r++) {
+            b->grid[r][col] = CELL_SHIP;
+            b->ship_map[r][col] = ship_idx;
+        }
+    } else if (dir == DIR_UP) {
+        start_row = row - size + 1;
+        start_col = col;
+        norm_dir = DIR_VERTICAL;
+        for (int r = row; r > row - size; r--) {
             b->grid[r][col] = CELL_SHIP;
             b->ship_map[r][col] = ship_idx;
         }
     }
 
+    /* Memorizziamo sempre le coordinate canoniche (vertice in alto a sinistra) */
+    b->ships[ship_idx].row = start_row;
+    b->ships[ship_idx].col = start_col;
+    b->ships[ship_idx].dir = norm_dir;
+    b->ships[ship_idx].placed = true;
     b->ships_placed++;
+
     return true;
 }
 
@@ -120,7 +169,7 @@ void board_auto_place_all(Board *b) {
             attempts++;
             int r = rand() % BOARD_SIZE;
             int c = rand() % BOARD_SIZE;
-            ShipDirection dir = (rand() % 2 == 0) ? DIR_HORIZONTAL : DIR_VERTICAL;
+            ShipDirection dir = (ShipDirection)(rand() % 4);
 
             if (board_place_ship(b, i, r, c, dir)) {
                 placed = true;

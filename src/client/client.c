@@ -89,19 +89,106 @@ static int do_ship_placement(int sock, Board *my_board) {
 
             char dir_buf[32];
             ShipDirection dir = DIR_HORIZONTAL;
-            while (1) {
+            char dir_c = 'H';
+            bool orientation_chosen = false;
+
+            while (!orientation_chosen && g_client_running) {
                 printf("Orientamento [H = Orizzontale, V = Verticale]: ");
                 fflush(stdout);
                 if (safe_read_line(dir_buf, sizeof(dir_buf)) < 0) return -1;
                 char *td = trim_whitespace(dir_buf);
-                if (td && (toupper((unsigned char)td[0]) == 'H')) {
-                    dir = DIR_HORIZONTAL;
-                    break;
-                } else if (td && (toupper((unsigned char)td[0]) == 'V')) {
-                    dir = DIR_VERTICAL;
-                    break;
+                if (!td || strlen(td) == 0) continue;
+                char choice = (char)toupper((unsigned char)td[0]);
+
+                if (choice == 'H') {
+                    bool can_right = board_can_place_ship(my_board, i, r, c, DIR_RIGHT, NULL);
+                    bool can_left  = board_can_place_ship(my_board, i, r, c, DIR_LEFT, NULL);
+
+                    if (can_right && can_left) {
+                        /* Vi è la possibilità di scegliere entrambi: chiediamo all'utente */
+                        while (1) {
+                            printf("  Direzione orizzontale [D = Verso Destra, S = Verso Sinistra]: ");
+                            fflush(stdout);
+                            if (safe_read_line(dir_buf, sizeof(dir_buf)) < 0) return -1;
+                            char *sub = trim_whitespace(dir_buf);
+                            if (sub && (toupper((unsigned char)sub[0]) == 'D' || toupper((unsigned char)sub[0]) == 'R')) {
+                                dir = DIR_RIGHT;
+                                dir_c = 'D';
+                                break;
+                            } else if (sub && (toupper((unsigned char)sub[0]) == 'S' || toupper((unsigned char)sub[0]) == 'L')) {
+                                dir = DIR_LEFT;
+                                dir_c = 'S';
+                                break;
+                            }
+                            printf("\033[1;31m  [!] Inserisci D per Destra o S per Sinistra.\033[0m\n");
+                        }
+                        orientation_chosen = true;
+                    } else if (can_right) {
+                        printf("\033[1;36m  [i] Verso sinistra non c'è spazio: posizionamento automatico verso Destra.\033[0m\n");
+                        dir = DIR_RIGHT;
+                        dir_c = 'D';
+                        orientation_chosen = true;
+                    } else if (can_left) {
+                        printf("\033[1;36m  [i] Verso destra non c'è spazio: posizionamento automatico verso Sinistra.\033[0m\n");
+                        dir = DIR_LEFT;
+                        dir_c = 'S';
+                        orientation_chosen = true;
+                    } else {
+                        printf("\033[1;31m[!] Nessuna direzione orizzontale valida (Destra o Sinistra) da questa coordinata.\033[0m\n");
+                        break;
+                    }
+                } else if (choice == 'V') {
+                    bool can_down = board_can_place_ship(my_board, i, r, c, DIR_DOWN, NULL);
+                    bool can_up   = board_can_place_ship(my_board, i, r, c, DIR_UP, NULL);
+
+                    if (can_down && can_up) {
+                        /* Vi è la possibilità di scegliere entrambi: chiediamo all'utente */
+                        while (1) {
+                            printf("  Direzione verticale [B = Verso il Basso, A = Verso l'Alto]: ");
+                            fflush(stdout);
+                            if (safe_read_line(dir_buf, sizeof(dir_buf)) < 0) return -1;
+                            char *sub = trim_whitespace(dir_buf);
+                            if (sub && (toupper((unsigned char)sub[0]) == 'B' || toupper((unsigned char)sub[0]) == 'V')) {
+                                dir = DIR_DOWN;
+                                dir_c = 'B';
+                                break;
+                            } else if (sub && (toupper((unsigned char)sub[0]) == 'A' || toupper((unsigned char)sub[0]) == 'U')) {
+                                dir = DIR_UP;
+                                dir_c = 'A';
+                                break;
+                            }
+                            printf("\033[1;31m  [!] Inserisci B per Basso o A per Alto.\033[0m\n");
+                        }
+                        orientation_chosen = true;
+                    } else if (can_down) {
+                        printf("\033[1;36m  [i] Verso l'alto non c'è spazio: posizionamento automatico verso il Basso.\033[0m\n");
+                        dir = DIR_DOWN;
+                        dir_c = 'B';
+                        orientation_chosen = true;
+                    } else if (can_up) {
+                        printf("\033[1;36m  [i] Verso il basso non c'è spazio: posizionamento automatico verso l'Alto.\033[0m\n");
+                        dir = DIR_UP;
+                        dir_c = 'A';
+                        orientation_chosen = true;
+                    } else {
+                        printf("\033[1;31m[!] Nessuna direzione verticale valida (In alto o In basso) da questa coordinata.\033[0m\n");
+                        break;
+                    }
+                } else if (choice == 'D') {
+                    dir = DIR_RIGHT; dir_c = 'D'; orientation_chosen = true;
+                } else if (choice == 'S') {
+                    dir = DIR_LEFT; dir_c = 'S'; orientation_chosen = true;
+                } else if (choice == 'B') {
+                    dir = DIR_DOWN; dir_c = 'B'; orientation_chosen = true;
+                } else if (choice == 'A') {
+                    dir = DIR_UP; dir_c = 'A'; orientation_chosen = true;
+                } else {
+                    printf("\033[1;31m[!] Scelta non valida. Inserisci H per orizzontale o V per verticale.\033[0m\n");
                 }
-                printf("\033[1;31m[!] Scelta non valida. Inserisci H per orizzontale o V per verticale.\033[0m\n");
+            }
+
+            if (!orientation_chosen) {
+                continue;
             }
 
             const char *err = NULL;
@@ -110,7 +197,6 @@ static int do_ship_placement(int sock, Board *my_board) {
                 continue;
             }
 
-            char dir_c = (dir == DIR_VERTICAL) ? 'V' : 'H';
             send_line(sock, "PLACE_SHIP %d %d %d %c", i, r, c, dir_c);
 
             char resp[BUFFER_SIZE];
