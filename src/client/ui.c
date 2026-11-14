@@ -138,7 +138,7 @@ void ui_mark_sunk_on_board(Board *my_board,
         s->sunk = true;
         for (int i = 0; i < s->size; i++) {
             int r = (s->dir == DIR_VERTICAL) ? (s->row + i) : s->row;
-            int c = (s->dir == DIR_HORIZONTAL) ? (s->col + i) : (s->col + i);
+            int c = (s->dir == DIR_HORIZONTAL) ? (s->col + i) : s->col;
             if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
                 my_board->grid[r][c] = CELL_SUNK;
             }
